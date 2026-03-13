@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     judge_ollama_model: str = ""
     judge_local_model_path: str = ""
 
+    embedding_provider: str = ""
+    embedding_api_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_api_model: str = ""
+    embedding_ollama_base_url: str = ""
+    embedding_ollama_model: str = ""
+    embedding_local_model_path: str = ""
+    local_infer_device: str = "cpu"
+
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_chat_model: str = "gpt-4o-mini"

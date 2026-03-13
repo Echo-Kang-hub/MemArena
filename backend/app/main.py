@@ -73,6 +73,8 @@ def options() -> dict:
         "assemblers": ["SystemInjector", "XMLTagging", "TimelineRollover"],
         "reflectors": ["None", "GenerativeReflection", "ConflictResolver"],
         "providers": ["api", "ollama", "local"],
+        "compute_devices": ["cpu", "cuda"],
+        "max_concurrency_limit": 32,
         "similarity_strategies": ["inverse_distance", "exp_decay", "linear"],
     }
 
@@ -92,15 +94,25 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             "session_id": payload.session_id,
             "user_id": payload.user_id,
             "config": payload.config.model_dump(),
+            "effective_provider_routing": {
+                "chat": str(payload.config.chat_llm_provider or payload.config.llm_provider),
+                "judge": str(payload.config.judge_llm_provider or payload.config.llm_provider),
+                "embedding": str(payload.config.embedding_provider),
+                "compute_device": payload.config.compute_device,
+            },
             "retrieval": payload.retrieval.model_dump(),
         },
     )
 
     try:
         # 初始化模型工厂，用于引擎检索和 LLM-as-a-Judge
-        llm_client = ProviderFactory.build_chat_llm(payload.config.llm_provider)
-        judge_llm_client = ProviderFactory.build_judge_llm()
-        embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider)
+        chat_provider = payload.config.chat_llm_provider or payload.config.llm_provider
+        judge_provider = payload.config.judge_llm_provider or payload.config.llm_provider
+        compute_device = payload.config.compute_device
+
+        llm_client = ProviderFactory.build_chat_llm(chat_provider, compute_device)
+        judge_llm_client = ProviderFactory.build_judge_llm(judge_provider, compute_device)
+        embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider, compute_device)
 
         effective_collection_name = payload.retrieval.collection_name
         if effective_collection_name == settings.chroma_collection_name:
@@ -275,14 +287,19 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
 
 
 async def _execute_batch(run_id: str, payload: BatchBenchmarkRunRequest, track_progress: bool = False) -> BatchBenchmarkRunResponse:
-    case_results: list[BenchmarkRunResponse] = []
+    total_cases = len(payload.cases)
+    case_results: list[BenchmarkRunResponse | None] = [None] * total_cases
+    completed_count = 0
+    max_workers = max(1, payload.max_concurrency)
+
     write_audit_event(
         "run_batch_start",
         {
             "run_id": run_id,
             "user_id": payload.user_id,
-            "total": len(payload.cases),
+            "total": total_cases,
             "isolate_sessions": payload.isolate_sessions,
+            "max_concurrency": max_workers,
             "config": payload.config.model_dump(),
             "retrieval": payload.retrieval.model_dump(),
         },
@@ -293,18 +310,17 @@ async def _execute_batch(run_id: str, payload: BatchBenchmarkRunRequest, track_p
             "run_id": run_id,
             "status": "running",
             "completed": 0,
-            "total": len(payload.cases),
+            "total": total_cases,
             "message": "任务开始执行",
             "result": None,
         }
 
-    for idx, case in enumerate(payload.cases, start=1):
+    semaphore = asyncio.Semaphore(max_workers)
+
+    async def run_case(index: int, case) -> tuple[int, BenchmarkRunResponse]:
         session_id = case.session_id
         if payload.isolate_sessions:
             session_id = f"{run_id}-{case.case_id}"
-
-        if track_progress:
-            RUN_STATES[run_id]["message"] = f"正在运行 case {idx}/{len(payload.cases)}"
 
         single_req = BenchmarkRunRequest(
             config=payload.config,
@@ -314,22 +330,43 @@ async def _execute_batch(run_id: str, payload: BatchBenchmarkRunRequest, track_p
             expected_facts=case.expected_facts,
             retrieval=payload.retrieval,
         )
-        if track_progress:
-            # 后台批量任务放到线程执行，避免阻塞事件循环导致状态轮询超时。
-            result = await asyncio.to_thread(lambda: asyncio.run(_execute_single(payload=single_req, run_id=run_id)))
-        else:
-            result = await _execute_single(payload=single_req, run_id=run_id)
-        case_results.append(result)
 
-        if track_progress:
-            RUN_STATES[run_id]["completed"] = idx
+        # 单 case 内含多段同步 I/O（embedding/检索/LLM 调用），
+        # 若直接在事件循环里 await 会阻塞其它任务，导致“并发参数生效但执行串行”。
+        def run_single_in_thread() -> BenchmarkRunResponse:
+            return asyncio.run(_execute_single(payload=single_req, run_id=run_id))
 
-    batch_result = _build_batch_response(run_id=run_id, case_results=case_results)
+        async with semaphore:
+            if track_progress:
+                RUN_STATES[run_id]["message"] = f"并发运行中: case {index + 1}/{total_cases}"
+            # 所有批量模式统一在线程中执行单 case，确保并发真实生效。
+            result = await asyncio.to_thread(run_single_in_thread)
+        return index, result
+
+    tasks = [asyncio.create_task(run_case(idx, case)) for idx, case in enumerate(payload.cases)]
+
+    try:
+        for completed_future in asyncio.as_completed(tasks):
+            index, result = await completed_future
+            case_results[index] = result
+            completed_count += 1
+            if track_progress:
+                RUN_STATES[run_id]["completed"] = completed_count
+                RUN_STATES[run_id]["message"] = f"并发运行中: {completed_count}/{total_cases}"
+    except Exception:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        raise
+
+    final_case_results = [item for item in case_results if item is not None]
+
+    batch_result = _build_batch_response(run_id=run_id, case_results=final_case_results)
     write_audit_event(
         "run_batch_success",
         {
             "run_id": run_id,
-            "completed": len(case_results),
+            "completed": len(final_case_results),
             "avg_metrics": batch_result.avg_metrics.model_dump(),
         },
     )
@@ -388,6 +425,7 @@ async def run_dataset_benchmark(payload: DatasetRunRequest) -> BatchBenchmarkRun
         user_id=payload.user_id,
         cases=selected_cases,
         isolate_sessions=payload.isolate_sessions,
+        max_concurrency=payload.max_concurrency,
     )
     return await run_batch_benchmark(batch_req)
 
@@ -420,6 +458,7 @@ async def run_dataset_benchmark_async(payload: DatasetRunRequest) -> AsyncRunSta
         user_id=payload.user_id,
         cases=selected_cases,
         isolate_sessions=payload.isolate_sessions,
+        max_concurrency=payload.max_concurrency,
     )
     return await run_batch_benchmark_async(batch_req)
 

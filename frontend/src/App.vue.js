@@ -7,7 +7,10 @@ const config = ref({
     assembler: 'SystemInjector',
     reflector: 'None',
     llm_provider: 'api',
-    embedding_provider: 'ollama'
+    chat_llm_provider: 'api',
+    judge_llm_provider: 'api',
+    embedding_provider: 'ollama',
+    compute_device: 'cpu'
 });
 const inputText = ref('我下周要去上海出差，记得提醒我带护照和会议材料。');
 const expectedFactsRaw = ref('上海\n护照\n会议材料');
@@ -27,6 +30,7 @@ const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
+const maxConcurrency = ref(3);
 const requestTimeoutMs = ref(120000);
 const progressText = ref('');
 const elapsedMs = ref(0);
@@ -38,6 +42,7 @@ const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'];
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'];
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'];
 const providers = ['api', 'ollama', 'local'];
+const computeDevices = ['cpu', 'cuda'];
 function startRunTimer() {
     stopRunTimer();
     runStartTs = Date.now();
@@ -225,6 +230,7 @@ async function onRunBatchBenchmark() {
             config: config.value,
             user_id: 'ui-batch-user',
             isolate_sessions: isolateSessions.value,
+            max_concurrency: maxConcurrency.value,
             retrieval: {
                 top_k: retrievalTopK.value,
                 min_relevance: minRelevance.value,
@@ -279,6 +285,7 @@ async function onRunBuiltinDataset() {
             sample_size: datasetSampleSize.value,
             start_index: datasetStartIndex.value,
             isolate_sessions: isolateSessions.value,
+            max_concurrency: maxConcurrency.value,
             retrieval: {
                 top_k: retrievalTopK.value,
                 min_relevance: minRelevance.value,
@@ -407,7 +414,22 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
-    value: (__VLS_ctx.config.llm_provider),
+    value: (__VLS_ctx.config.chat_llm_provider),
+    ...{ class: "select" },
+});
+for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        key: (x),
+        value: (x),
+    });
+    (x);
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    value: (__VLS_ctx.config.judge_llm_provider),
     ...{ class: "select" },
 });
 for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
@@ -426,6 +448,21 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElement
     ...{ class: "select" },
 });
 for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        key: (x),
+        value: (x),
+    });
+    (x);
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    value: (__VLS_ctx.config.compute_device),
+    ...{ class: "select" },
+});
+for (const [x] of __VLS_getVForSourceType((__VLS_ctx.computeDevices))) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
         key: (x),
         value: (x),
@@ -587,6 +624,17 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
 });
 (__VLS_ctx.isolateSessions);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field mt-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "1",
+    max: "32",
+    ...{ class: "select" },
+});
+(__VLS_ctx.maxConcurrency);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "field mt-2" },
 });
@@ -822,6 +870,10 @@ else {
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
@@ -884,6 +936,9 @@ else {
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
@@ -1078,6 +1133,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             datasetSampleSize: datasetSampleSize,
             datasetStartIndex: datasetStartIndex,
             isolateSessions: isolateSessions,
+            maxConcurrency: maxConcurrency,
             requestTimeoutMs: requestTimeoutMs,
             progressText: progressText,
             lastRunDurationMs: lastRunDurationMs,
@@ -1086,6 +1142,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             assemblers: assemblers,
             reflectors: reflectors,
             providers: providers,
+            computeDevices: computeDevices,
             runningDurationLabel: runningDurationLabel,
             finishedDurationLabel: finishedDurationLabel,
             singleDerivedRows: singleDerivedRows,

@@ -1,4 +1,5 @@
 export type ProviderType = 'api' | 'ollama' | 'local';
+export type ComputeDevice = 'cpu' | 'cuda';
 
 export interface BenchmarkConfig {
   processor: 'RawLogger' | 'Summarizer' | 'EntityExtractor';
@@ -6,7 +7,10 @@ export interface BenchmarkConfig {
   assembler: 'SystemInjector' | 'XMLTagging' | 'TimelineRollover';
   reflector: 'None' | 'GenerativeReflection' | 'ConflictResolver';
   llm_provider: ProviderType;
+  chat_llm_provider?: ProviderType;
+  judge_llm_provider?: ProviderType;
   embedding_provider: ProviderType;
+  compute_device?: ComputeDevice;
 }
 
 export interface BenchmarkRunRequest {
@@ -59,6 +63,7 @@ export interface BatchBenchmarkRunRequest {
   user_id: string;
   cases: BatchCase[];
   isolate_sessions?: boolean;
+  max_concurrency?: number;
 }
 
 export interface BatchBenchmarkRunResponse {
@@ -76,6 +81,7 @@ export interface DatasetRunRequest {
   sample_size: number;
   start_index: number;
   isolate_sessions?: boolean;
+  max_concurrency?: number;
 }
 
 export interface DatasetSummary {

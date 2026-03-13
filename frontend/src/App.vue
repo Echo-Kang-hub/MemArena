@@ -21,7 +21,10 @@ const config = ref<BenchmarkConfig>({
   assembler: 'SystemInjector',
   reflector: 'None',
   llm_provider: 'api',
-  embedding_provider: 'ollama'
+  chat_llm_provider: 'api',
+  judge_llm_provider: 'api',
+  embedding_provider: 'ollama',
+  compute_device: 'cpu'
 });
 
 const inputText = ref('我下周要去上海出差，记得提醒我带护照和会议材料。');
@@ -42,6 +45,7 @@ const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
+const maxConcurrency = ref(3);
 const requestTimeoutMs = ref(120000);
 const progressText = ref('');
 const elapsedMs = ref(0);
@@ -55,6 +59,7 @@ const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const;
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
 const providers = ['api', 'ollama', 'local'] as const;
+const computeDevices = ['cpu', 'cuda'] as const;
 
 function startRunTimer() {
   stopRunTimer();
@@ -262,6 +267,7 @@ async function onRunBatchBenchmark() {
       config: config.value,
       user_id: 'ui-batch-user',
       isolate_sessions: isolateSessions.value,
+      max_concurrency: maxConcurrency.value,
       retrieval: {
         top_k: retrievalTopK.value,
         min_relevance: minRelevance.value,
@@ -320,6 +326,7 @@ async function onRunBuiltinDataset() {
       sample_size: datasetSampleSize.value,
       start_index: datasetStartIndex.value,
       isolate_sessions: isolateSessions.value,
+      max_concurrency: maxConcurrency.value,
       retrieval: {
         top_k: retrievalTopK.value,
         min_relevance: minRelevance.value,
@@ -397,8 +404,14 @@ function downloadCsvReport() {
             </select>
           </label>
           <label class="field">
-            <span>LLM Provider</span>
-            <select v-model="config.llm_provider" class="select">
+            <span>Chat LLM Provider</span>
+            <select v-model="config.chat_llm_provider" class="select">
+              <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Judge LLM Provider</span>
+            <select v-model="config.judge_llm_provider" class="select">
               <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
@@ -406,6 +419,12 @@ function downloadCsvReport() {
             <span>Embedding Provider</span>
             <select v-model="config.embedding_provider" class="select">
               <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Compute Device (Local)</span>
+            <select v-model="config.compute_device" class="select">
+              <option v-for="x in computeDevices" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
 
@@ -478,6 +497,10 @@ function downloadCsvReport() {
             <label class="mt-2 flex items-center gap-2 text-sm text-slate-200">
               <input v-model="isolateSessions" type="checkbox" />
               <span>每个测试独立会话（推荐）</span>
+            </label>
+            <label class="field mt-2">
+              <span>Batch Max Concurrency</span>
+              <input v-model.number="maxConcurrency" type="number" min="1" max="32" class="select" />
             </label>
             <label class="field mt-2">
               <span>请求超时 (ms)</span>

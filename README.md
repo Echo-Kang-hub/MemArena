@@ -119,14 +119,13 @@ docker compose up --build
 
 ## .env 填写规则
 - 建议保留所有键名，不要删除；未使用的 provider 填空值即可。
-- 聊天模型与评测模型建议按功能分开配置：
-  - `CHAT_*` 控制聊天链路模型。
-  - `JUDGE_*` 控制 LLM-as-a-Judge 模型。
-  - 两者可配置成不同 provider 和不同模型。
-- 若 `CHAT_*` 或 `JUDGE_*` 留空，系统会回退到兼容键（如 `OPENAI_*` / `OLLAMA_*`）。
-- 若 embedding 使用 Ollama：
-  - 需要填写 `OLLAMA_BASE_URL` 与 `OLLAMA_EMBED_MODEL`。
-  - `LOCAL_EMBED_MODEL_PATH` 可留空。
+- 推荐按功能分三组独立配置：
+  - `CHAT_*`：聊天链路模型。
+  - `EMBEDDING_*`：向量模型链路。
+  - `JUDGE_*`：LLM-as-a-Judge 模型。
+- 三组可配置为不同 provider 与不同 base URL（例如 Chat 走 API 网关、Judge 走另一个评测网关）。
+- 若 `CHAT_*` / `EMBEDDING_*` / `JUDGE_*` 留空，会回退到兼容键（如 `OPENAI_*` / `OLLAMA_*` / `LOCAL_*`）。
+- 本地推理设备可用 `LOCAL_INFER_DEVICE=cpu|cuda` 设置默认值，前端也可按任务覆盖。
 - Chroma 相关：
   - `CHROMA_PERSIST_DIR` 为持久化目录。
   - `CHROMA_COLLECTION_NAME` 为默认集合名。
@@ -172,41 +171,9 @@ docker compose up --build
 - `GET /api/datasets`：查看内置数据集及条目数。
 - `GET /api/options`：可选模块与检索策略枚举。
 
-## 指标定义与解读
-- `Precision`：检索结果中“有用信息”的占比，越高说明噪声越少。
-- `Faithfulness`：期望事实被覆盖的程度，越高说明召回更完整。
-- `InfoLoss`：关键信息缺失程度，越低越好（可视为 `1 - Retention`）。
-
-前端同时显示一些派生信号，帮助避免“只看三个均值”的误判：
-- `F1 (P&R Balance)`：平衡 Precision 与 Faithfulness。
-- `Retention (1-InfoLoss)`：保留信息比例。
-- `Hallucination Risk (1-P)`：噪声/幻觉风险近似值。
-- `Pass Rate`（批量）：达到阈值样本占比（默认 `P>=0.8, F>=0.8, L<=0.2`）。
-- `Std(P/F/L)`（批量）：波动性，越低越稳定。
-- `Worst-case F1`（批量）：最差样本表现，反映下限可靠性。
-
-### 代表性边界说明
-- 这组指标对“记忆检索与事实覆盖”很有用，但不是通用 AI 能力总分。
-- 指标依赖 `expected_facts` 的质量；标注不全会导致分数虚高或虚低。
-- `LLM-as-a-Judge` 可能存在评委偏差，建议配合抽样人工复核。
-- 建议把 `均值 + 波动 + 最差样本 + 原始评审理由` 一起看，而不是只看单一高分。
-
-## 如何构造更有挑战性的测试
-- 干扰信息：在输入中混入相似实体（如上海/上饶、周二/下周二）测试抗混淆能力。
-- 时序冲突：同会话多轮改期/撤销，检验是否能覆盖“最新事实”。
-- 长上下文噪声：在 20~50 条历史中插入少量关键事实，观察召回稳定性。
-- 否定与条件句：例如“如果下雨就取消，不下雨正常进行”，检查条件约束处理。
-- 多语言与口语：中英混写、缩写、错别字，测试鲁棒性。
-- 对抗样本：加入错误先验或诱导描述，检查是否被污染。
-
-建议至少维护三类数据集：
-- `smoke`：快速冒烟，保证链路通。
-- `regression`：固定回归，防止改动后退化。
-- `hard`：高难样本集，用于区分模型/策略差异。
-
-## 运行计时显示
-- 前端在执行中会实时显示 `Elapsed`。
-- 执行结束后会显示 `Last Run Duration`，用于对比不同配置耗时。
+## 评估标准文档
+- 评估指标定义、衍生指标、阈值建议、代表性边界与高挑战测试设计已独立到：`docs/evaluation_criteria.md`。
+- 前端结果面板会展示核心三指标与附加稳定性信号，便于做更真实的横向对比。
 
 ## 内置数据集放置位置
 - 将下载的数据集文件放到 `backend/datasets/`，格式为 JSON 数组。

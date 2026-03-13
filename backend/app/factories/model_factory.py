@@ -16,6 +16,7 @@ class LLMClient:
     model: str
     endpoint: str
     api_key: str = ""
+    compute_device: str = "cpu"
 
     def generate(
         self,
@@ -91,7 +92,7 @@ class LLMClient:
                     "ok": True,
                     "duration_ms": round((perf_counter() - started) * 1000, 2),
                     "prompt_preview": prompt[:200],
-                    "note": "local placeholder",
+                    "note": f"local placeholder, device={self.compute_device}",
                 },
             )
             return f"[local:{self.model}] {prompt[:500]}"
@@ -118,6 +119,7 @@ class EmbeddingClient:
     model: str
     endpoint: str
     api_key: str = ""
+    compute_device: str = "cpu"
 
     def embed(self, text: str) -> list[float]:
         started = perf_counter()
@@ -203,7 +205,7 @@ class EmbeddingClient:
                 "ok": True,
                 "duration_ms": round((perf_counter() - started) * 1000, 2),
                 "text_preview": text[:200],
-                "note": "local fallback embedding",
+                "note": f"local fallback embedding, device={self.compute_device}",
             },
         )
         return [base + 0.1 * i for i in range(32)]
@@ -216,9 +218,19 @@ class ProviderFactory:
         return provider if isinstance(provider, ProviderType) else ProviderType(str(provider))
 
     @staticmethod
-    def _build_function_llm(function: str, provider_override: ProviderType | None = None) -> LLMClient:
+    def _normalize_device(raw_device: str | None) -> str:
+        device = (raw_device or settings.local_infer_device or "cpu").strip().lower()
+        return "cuda" if device == "cuda" else "cpu"
+
+    @staticmethod
+    def _build_function_llm(
+        function: str,
+        provider_override: ProviderType | None = None,
+        compute_device: str | None = None,
+    ) -> LLMClient:
         provider_key = f"{function}_llm_provider"
         provider = ProviderFactory._normalize_provider(provider_override or getattr(settings, provider_key, ""))
+        device = ProviderFactory._normalize_device(compute_device)
 
         if provider == ProviderType.api:
             return LLMClient(
@@ -226,26 +238,29 @@ class ProviderFactory:
                 model=getattr(settings, f"{function}_api_model") or settings.openai_chat_model,
                 endpoint=getattr(settings, f"{function}_api_base_url") or settings.openai_base_url,
                 api_key=getattr(settings, f"{function}_api_key") or settings.openai_api_key,
+                compute_device=device,
             )
         if provider == ProviderType.ollama:
             return LLMClient(
                 provider=provider,
                 model=getattr(settings, f"{function}_ollama_model") or settings.ollama_llm_model,
                 endpoint=getattr(settings, f"{function}_ollama_base_url") or settings.ollama_base_url,
+                compute_device=device,
             )
         return LLMClient(
             provider=provider,
             model=getattr(settings, f"{function}_local_model_path") or settings.local_llm_model_path or "local-llm",
             endpoint="local",
+            compute_device=device,
         )
 
     @staticmethod
-    def build_chat_llm(provider_override: ProviderType | None = None) -> LLMClient:
-        return ProviderFactory._build_function_llm("chat", provider_override)
+    def build_chat_llm(provider_override: ProviderType | None = None, compute_device: str | None = None) -> LLMClient:
+        return ProviderFactory._build_function_llm("chat", provider_override, compute_device)
 
     @staticmethod
-    def build_judge_llm(provider_override: ProviderType | None = None) -> LLMClient:
-        return ProviderFactory._build_function_llm("judge", provider_override)
+    def build_judge_llm(provider_override: ProviderType | None = None, compute_device: str | None = None) -> LLMClient:
+        return ProviderFactory._build_function_llm("judge", provider_override, compute_device)
 
     @staticmethod
     def build_llm(provider: ProviderType) -> LLMClient:
@@ -253,15 +268,29 @@ class ProviderFactory:
         return ProviderFactory.build_chat_llm(provider_override=provider)
 
     @staticmethod
-    def build_embedding(provider: ProviderType) -> EmbeddingClient:
-        if provider == ProviderType.api:
+    def build_embedding(provider: ProviderType, compute_device: str | None = None) -> EmbeddingClient:
+        device = ProviderFactory._normalize_device(compute_device)
+        configured_provider = ProviderFactory._normalize_provider(provider or settings.embedding_provider)
+
+        if configured_provider == ProviderType.api:
             return EmbeddingClient(
-                provider=provider,
-                model=settings.openai_embed_model,
-                endpoint=settings.openai_base_url,
-                api_key=settings.openai_api_key,
+                provider=configured_provider,
+                model=settings.embedding_api_model or settings.openai_embed_model,
+                endpoint=settings.embedding_api_base_url or settings.openai_base_url,
+                api_key=settings.embedding_api_key or settings.openai_api_key,
+                compute_device=device,
             )
-        if provider == ProviderType.ollama:
+        if configured_provider == ProviderType.ollama:
             # 默认重点支持 Qwen/Qwen3-Embedding-0.6B
-            return EmbeddingClient(provider=provider, model=settings.ollama_embed_model, endpoint=settings.ollama_base_url)
-        return EmbeddingClient(provider=provider, model=settings.local_embed_model_path or "local-embedding", endpoint="local")
+            return EmbeddingClient(
+                provider=configured_provider,
+                model=settings.embedding_ollama_model or settings.ollama_embed_model,
+                endpoint=settings.embedding_ollama_base_url or settings.ollama_base_url,
+                compute_device=device,
+            )
+        return EmbeddingClient(
+            provider=configured_provider,
+            model=settings.embedding_local_model_path or settings.local_embed_model_path or "local-embedding",
+            endpoint="local",
+            compute_device=device,
+        )

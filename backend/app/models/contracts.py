@@ -150,8 +150,11 @@ class BenchmarkConfig(BaseModel):
     engine: EngineType
     assembler: AssemblerType
     reflector: ReflectorType = ReflectorType.none
-    llm_provider: ProviderType
+    llm_provider: ProviderType = ProviderType.api
+    chat_llm_provider: ProviderType | None = None
+    judge_llm_provider: ProviderType | None = None
     embedding_provider: ProviderType
+    compute_device: str = Field(default="cpu", pattern="^(cpu|cuda)$")
 
 
 class RetrievalConfig(BaseModel):
@@ -194,6 +197,7 @@ class BatchBenchmarkRunRequest(BaseModel):
     user_id: str = "batch-user"
     cases: list[BatchCase]
     isolate_sessions: bool = True
+    max_concurrency: int = Field(default=1, ge=1, le=32)
 
 
 class BatchBenchmarkRunResponse(BaseModel):
@@ -211,6 +215,7 @@ class DatasetRunRequest(BaseModel):
     sample_size: int = Field(default=10, ge=1)
     start_index: int = Field(default=0, ge=0)
     isolate_sessions: bool = True
+    max_concurrency: int = Field(default=1, ge=1, le=32)
 
 
 class AsyncRunStartResponse(BaseModel):
