@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual envs
+.venv/
+venv/
+env/
+
+# Conda local files
+.conda/
+
+# Backend runtime data
+backend/data/
+backend/.cache/
+backend/logs/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/*.code-workspace
+.idea/
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Docker volumes / local state
+volumes/
+*.db
+*.sqlite
+*.sqlite3
