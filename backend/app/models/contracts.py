@@ -193,6 +193,7 @@ class BatchBenchmarkRunRequest(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     user_id: str = "batch-user"
     cases: list[BatchCase]
+    isolate_sessions: bool = True
 
 
 class BatchBenchmarkRunResponse(BaseModel):
@@ -200,3 +201,13 @@ class BatchBenchmarkRunResponse(BaseModel):
     case_results: list[BenchmarkRunResponse]
     avg_metrics: EvalMetrics
     csv_report: str
+
+
+class DatasetRunRequest(BaseModel):
+    dataset_name: str
+    config: BenchmarkConfig
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    user_id: str = "dataset-user"
+    sample_size: int = Field(default=10, ge=1)
+    start_index: int = Field(default=0, ge=0)
+    isolate_sessions: bool = True

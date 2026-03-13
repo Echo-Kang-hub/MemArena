@@ -16,6 +16,7 @@ from app.models.contracts import (
     BenchmarkRunResponse,
     BatchBenchmarkRunRequest,
     BatchBenchmarkRunResponse,
+    DatasetRunRequest,
     EvalMetrics,
     EngineSaveRequest,
     EngineSearchRequest,
@@ -24,6 +25,7 @@ from app.models.contracts import (
     RawConversationInput,
     ReflectRequest,
 )
+from app.services.dataset_loader import list_datasets, load_dataset_cases
 from app.registry import build_assembler, build_engine, build_processor, build_reflector
 
 app = FastAPI(title="MemArena Backend", version="0.1.0")
@@ -52,6 +54,11 @@ def options() -> dict:
         "providers": ["api", "ollama", "local"],
         "similarity_strategies": ["inverse_distance", "exp_decay", "linear"],
     }
+
+
+@app.get("/api/datasets")
+def datasets() -> dict:
+    return {"datasets": list_datasets()}
 
 
 async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = None) -> BenchmarkRunResponse:
@@ -143,9 +150,13 @@ async def run_batch_benchmark(payload: BatchBenchmarkRunRequest) -> BatchBenchma
     case_results: list[BenchmarkRunResponse] = []
 
     for case in payload.cases:
+        session_id = case.session_id
+        if payload.isolate_sessions:
+            session_id = f"{run_id}-{case.case_id}"
+
         single_req = BenchmarkRunRequest(
             config=payload.config,
-            session_id=case.session_id,
+            session_id=session_id,
             user_id=payload.user_id,
             input_text=case.input_text,
             expected_facts=case.expected_facts,
@@ -192,6 +203,23 @@ async def run_batch_benchmark(payload: BatchBenchmarkRunRequest) -> BatchBenchma
         avg_metrics=avg_metrics,
         csv_report=output.getvalue(),
     )
+
+
+@app.post("/api/benchmark/run-dataset", response_model=BatchBenchmarkRunResponse)
+async def run_dataset_benchmark(payload: DatasetRunRequest) -> BatchBenchmarkRunResponse:
+    all_cases = load_dataset_cases(payload.dataset_name)
+    start = payload.start_index
+    end = min(start + payload.sample_size, len(all_cases))
+    selected_cases = all_cases[start:end]
+
+    batch_req = BatchBenchmarkRunRequest(
+        config=payload.config,
+        retrieval=payload.retrieval,
+        user_id=payload.user_id,
+        cases=selected_cases,
+        isolate_sessions=payload.isolate_sessions,
+    )
+    return await run_batch_benchmark(batch_req)
 
 
 @app.get("/")

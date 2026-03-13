@@ -1,0 +1,27 @@
+[
+  {
+    "case_id": "smoke-1",
+    "input_text": "我下周二去上海开评审会，提醒我带护照和会议材料。",
+    "expected_facts": ["下周二", "上海", "护照", "会议材料"]
+  },
+  {
+    "case_id": "smoke-2",
+    "input_text": "请记住我喜欢无糖拿铁，明天早上 9 点提醒我。",
+    "expected_facts": ["无糖拿铁", "明天", "9 点"]
+  },
+  {
+    "case_id": "smoke-3",
+    "input_text": "周五要提交预算表，并通知产品经理王磊参加复盘。",
+    "expected_facts": ["周五", "预算表", "王磊", "复盘"]
+  },
+  {
+    "case_id": "smoke-4",
+    "input_text": "下个月 10 号出差深圳，提前一周订酒店。",
+    "expected_facts": ["下个月 10 号", "深圳", "订酒店"]
+  },
+  {
+    "case_id": "smoke-5",
+    "input_text": "客户 ACME 希望把交付时间从 4 月 1 日改到 4 月 8 日。",
+    "expected_facts": ["ACME", "4 月 1 日", "4 月 8 日"]
+  }
+]

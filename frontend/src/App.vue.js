@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import MetricBars from './components/MetricBars.vue';
-import { runBatchBenchmark, runBenchmark } from './api/client';
+import { listDatasets, runBatchBenchmark, runBenchmark, runDatasetBenchmark } from './api/client';
 const config = ref({
     processor: 'RawLogger',
     engine: 'VectorEngine',
@@ -22,11 +22,29 @@ const collectionName = ref('memarena_memory');
 const similarityStrategy = ref('inverse_distance');
 const keywordRerank = ref(false);
 const datasetCases = ref([]);
+const builtinDatasets = ref([]);
+const selectedDatasetName = ref('');
+const datasetSampleSize = ref(5);
+const datasetStartIndex = ref(0);
+const isolateSessions = ref(true);
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'];
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'];
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'];
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'];
 const providers = ['api', 'ollama', 'local'];
+async function loadBuiltinDatasets() {
+    try {
+        builtinDatasets.value = await listDatasets();
+        if (!selectedDatasetName.value && builtinDatasets.value.length > 0) {
+            selectedDatasetName.value = builtinDatasets.value[0].name;
+            datasetSampleSize.value = Math.min(5, builtinDatasets.value[0].count || 5);
+        }
+    }
+    catch {
+        // 后端不可用时不阻断页面
+    }
+}
+loadBuiltinDatasets();
 function handleDatasetUpload(event) {
     const file = event.target.files?.[0];
     if (!file)
@@ -96,6 +114,7 @@ async function onRunBatchBenchmark() {
         batchResult.value = await runBatchBenchmark({
             config: config.value,
             user_id: 'ui-batch-user',
+            isolate_sessions: isolateSessions.value,
             retrieval: {
                 top_k: retrievalTopK.value,
                 min_relevance: minRelevance.value,
@@ -108,6 +127,37 @@ async function onRunBatchBenchmark() {
     }
     catch (e) {
         error.value = e instanceof Error ? e.message : '批量运行失败，请检查后端服务。';
+    }
+    finally {
+        loading.value = false;
+    }
+}
+async function onRunBuiltinDataset() {
+    loading.value = true;
+    error.value = '';
+    result.value = null;
+    try {
+        if (!selectedDatasetName.value) {
+            throw new Error('请先选择内置数据集。');
+        }
+        batchResult.value = await runDatasetBenchmark({
+            dataset_name: selectedDatasetName.value,
+            config: config.value,
+            user_id: 'ui-dataset-user',
+            sample_size: datasetSampleSize.value,
+            start_index: datasetStartIndex.value,
+            isolate_sessions: isolateSessions.value,
+            retrieval: {
+                top_k: retrievalTopK.value,
+                min_relevance: minRelevance.value,
+                collection_name: collectionName.value,
+                similarity_strategy: similarityStrategy.value,
+                keyword_rerank: keywordRerank.value
+            }
+        });
+    }
+    catch (e) {
+        error.value = e instanceof Error ? e.message : '内置数据集运行失败。';
     }
     finally {
         loading.value = false;
@@ -338,6 +388,59 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
     ...{ class: "input-file" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "rounded-lg border border-slate-600/60 bg-slate-900/40 p-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    value: (__VLS_ctx.selectedDatasetName),
+    ...{ class: "select" },
+});
+for (const [d] of __VLS_getVForSourceType((__VLS_ctx.builtinDatasets))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        key: (d.name),
+        value: (d.name),
+    });
+    (d.name);
+    (d.count);
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mt-2 grid grid-cols-2 gap-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "1",
+    ...{ class: "select" },
+});
+(__VLS_ctx.datasetSampleSize);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "0",
+    ...{ class: "select" },
+});
+(__VLS_ctx.datasetStartIndex);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "mt-2 flex items-center gap-2 text-sm text-slate-200" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "checkbox",
+});
+(__VLS_ctx.isolateSessions);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "mt-5 flex items-center gap-3" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -352,6 +455,12 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElement
     disabled: (__VLS_ctx.loading),
 });
 (__VLS_ctx.loading ? 'Running...' : 'Run Batch');
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (__VLS_ctx.onRunBuiltinDataset) },
+    ...{ class: "run-btn" },
+    disabled: (__VLS_ctx.loading),
+});
+(__VLS_ctx.loading ? 'Running...' : 'Run Built-in Dataset');
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
     ...{ class: "text-sm text-slate-300" },
 });
@@ -511,10 +620,36 @@ else {
 /** @type {__VLS_StyleScopedClasses['textarea']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['input-file']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid-cols-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-5']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['items-center']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
@@ -614,6 +749,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             collectionName: collectionName,
             similarityStrategy: similarityStrategy,
             keywordRerank: keywordRerank,
+            builtinDatasets: builtinDatasets,
+            selectedDatasetName: selectedDatasetName,
+            datasetSampleSize: datasetSampleSize,
+            datasetStartIndex: datasetStartIndex,
+            isolateSessions: isolateSessions,
             processors: processors,
             engines: engines,
             assemblers: assemblers,
@@ -622,6 +762,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleDatasetUpload: handleDatasetUpload,
             onRunBenchmark: onRunBenchmark,
             onRunBatchBenchmark: onRunBatchBenchmark,
+            onRunBuiltinDataset: onRunBuiltinDataset,
             downloadCsvReport: downloadCsvReport,
         };
     },

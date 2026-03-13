@@ -58,6 +58,7 @@ export interface BatchBenchmarkRunRequest {
   retrieval: BenchmarkRunRequest['retrieval'];
   user_id: string;
   cases: BatchCase[];
+  isolate_sessions?: boolean;
 }
 
 export interface BatchBenchmarkRunResponse {
@@ -65,4 +66,20 @@ export interface BatchBenchmarkRunResponse {
   case_results: BenchmarkRunResponse[];
   avg_metrics: EvalMetrics;
   csv_report: string;
+}
+
+export interface DatasetRunRequest {
+  dataset_name: string;
+  config: BenchmarkConfig;
+  retrieval: BenchmarkRunRequest['retrieval'];
+  user_id: string;
+  sample_size: number;
+  start_index: number;
+  isolate_sessions?: boolean;
+}
+
+export interface DatasetSummary {
+  name: string;
+  file: string;
+  count: number;
 }

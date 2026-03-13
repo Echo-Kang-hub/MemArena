@@ -151,4 +151,13 @@ docker compose up --build
 ## API 概览
 - `POST /api/benchmark/run`：单条评测。
 - `POST /api/benchmark/run-batch`：批量评测，返回 `avg_metrics` 与 `csv_report`。
+- `POST /api/benchmark/run-dataset`：运行内置数据集，可指定 `sample_size/start_index`。
+- `GET /api/datasets`：查看内置数据集及条目数。
 - `GET /api/options`：可选模块与检索策略枚举。
+
+## 内置数据集放置位置
+- 将下载的数据集文件放到 `backend/datasets/`，格式为 JSON 数组。
+- 前端可直接选择内置数据集，并设置运行条数（Sample Size）与起始位置（Start Index）。
+- 每个测试默认可独立会话运行（避免样本间记忆干扰）。
+
+更多说明见：`docs/datasets.md`

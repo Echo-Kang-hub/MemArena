@@ -1,8 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import MetricBars from './components/MetricBars.vue';
-import { runBatchBenchmark, runBenchmark } from './api/client';
-import type { BatchBenchmarkRunResponse, BenchmarkConfig, BenchmarkRunResponse } from './types';
+import { listDatasets, runBatchBenchmark, runBenchmark, runDatasetBenchmark } from './api/client';
+import type {
+  BatchBenchmarkRunResponse,
+  BenchmarkConfig,
+  BenchmarkRunResponse,
+  DatasetSummary
+} from './types';
 
 const config = ref<BenchmarkConfig>({
   processor: 'RawLogger',
@@ -26,12 +31,31 @@ const collectionName = ref('memarena_memory');
 const similarityStrategy = ref<'inverse_distance' | 'exp_decay' | 'linear'>('inverse_distance');
 const keywordRerank = ref(false);
 const datasetCases = ref<Array<{ case_id: string; input_text: string; expected_facts: string[]; session_id: string }>>([]);
+const builtinDatasets = ref<DatasetSummary[]>([]);
+const selectedDatasetName = ref('');
+const datasetSampleSize = ref(5);
+const datasetStartIndex = ref(0);
+const isolateSessions = ref(true);
 
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'] as const;
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const;
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
 const providers = ['api', 'ollama', 'local'] as const;
+
+async function loadBuiltinDatasets() {
+  try {
+    builtinDatasets.value = await listDatasets();
+    if (!selectedDatasetName.value && builtinDatasets.value.length > 0) {
+      selectedDatasetName.value = builtinDatasets.value[0].name;
+      datasetSampleSize.value = Math.min(5, builtinDatasets.value[0].count || 5);
+    }
+  } catch {
+    // 后端不可用时不阻断页面
+  }
+}
+
+loadBuiltinDatasets();
 
 function handleDatasetUpload(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
@@ -104,6 +128,7 @@ async function onRunBatchBenchmark() {
     batchResult.value = await runBatchBenchmark({
       config: config.value,
       user_id: 'ui-batch-user',
+      isolate_sessions: isolateSessions.value,
       retrieval: {
         top_k: retrievalTopK.value,
         min_relevance: minRelevance.value,
@@ -115,6 +140,38 @@ async function onRunBatchBenchmark() {
     });
   } catch (e) {
     error.value = e instanceof Error ? e.message : '批量运行失败，请检查后端服务。';
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function onRunBuiltinDataset() {
+  loading.value = true;
+  error.value = '';
+  result.value = null;
+
+  try {
+    if (!selectedDatasetName.value) {
+      throw new Error('请先选择内置数据集。');
+    }
+
+    batchResult.value = await runDatasetBenchmark({
+      dataset_name: selectedDatasetName.value,
+      config: config.value,
+      user_id: 'ui-dataset-user',
+      sample_size: datasetSampleSize.value,
+      start_index: datasetStartIndex.value,
+      isolate_sessions: isolateSessions.value,
+      retrieval: {
+        top_k: retrievalTopK.value,
+        min_relevance: minRelevance.value,
+        collection_name: collectionName.value,
+        similarity_strategy: similarityStrategy.value,
+        keyword_rerank: keywordRerank.value
+      }
+    });
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '内置数据集运行失败。';
   } finally {
     loading.value = false;
   }
@@ -222,6 +279,32 @@ function downloadCsvReport() {
             <span>上传 JSON 测试集 (可选)</span>
             <input type="file" accept="application/json" class="input-file" @change="handleDatasetUpload" />
           </label>
+
+          <div class="rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <p class="mb-2 text-xs font-semibold text-arena-mint">内置数据集</p>
+            <label class="field">
+              <span>Dataset</span>
+              <select v-model="selectedDatasetName" class="select">
+                <option v-for="d in builtinDatasets" :key="d.name" :value="d.name">
+                  {{ d.name }} ({{ d.count }})
+                </option>
+              </select>
+            </label>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              <label class="field">
+                <span>Sample Size</span>
+                <input v-model.number="datasetSampleSize" type="number" min="1" class="select" />
+              </label>
+              <label class="field">
+                <span>Start Index</span>
+                <input v-model.number="datasetStartIndex" type="number" min="0" class="select" />
+              </label>
+            </div>
+            <label class="mt-2 flex items-center gap-2 text-sm text-slate-200">
+              <input v-model="isolateSessions" type="checkbox" />
+              <span>每个测试独立会话（推荐）</span>
+            </label>
+          </div>
         </div>
 
         <div class="mt-5 flex items-center gap-3">
@@ -230,6 +313,9 @@ function downloadCsvReport() {
           </button>
           <button class="run-btn" :disabled="loading" @click="onRunBatchBenchmark">
             {{ loading ? 'Running...' : 'Run Batch' }}
+          </button>
+          <button class="run-btn" :disabled="loading" @click="onRunBuiltinDataset">
+            {{ loading ? 'Running...' : 'Run Built-in Dataset' }}
           </button>
           <span class="text-sm text-slate-300">Execution</span>
         </div>
