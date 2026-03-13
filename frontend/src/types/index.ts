@@ -32,6 +32,12 @@ export interface EvalMetrics {
   precision: number;
   faithfulness: number;
   info_loss: number;
+  recall_at_k?: number | null;
+  qa_accuracy?: number | null;
+  qa_f1?: number | null;
+  consistency_score?: number | null;
+  rejection_rate?: number | null;
+  rejection_correctness_unknown?: number | null;
 }
 
 export interface BenchmarkRunResponse {

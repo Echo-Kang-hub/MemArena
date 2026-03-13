@@ -127,6 +127,7 @@ class EvalCase(BaseModel):
 class EvalRequest(BaseModel):
     run_id: str
     assembled_prompt: str
+    generated_response: str = ""
     retrieved: list[MemoryHit]
     expected_facts: list[str] = Field(default_factory=list)
 
@@ -135,6 +136,12 @@ class EvalMetrics(BaseModel):
     precision: float
     faithfulness: float
     info_loss: float
+    recall_at_k: float | None = None
+    qa_accuracy: float | None = None
+    qa_f1: float | None = None
+    consistency_score: float | None = None
+    rejection_rate: float | None = None
+    rejection_correctness_unknown: float | None = None
 
 
 class EvalResult(BaseModel):

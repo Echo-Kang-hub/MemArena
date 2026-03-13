@@ -186,6 +186,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             EvalRequest(
                 run_id=cur_run_id,
                 assembled_prompt=assemble_result.prompt,
+                generated_response=agent_response,
                 retrieved=search_result.hits,
                 expected_facts=payload.expected_facts,
             )
@@ -251,15 +252,64 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
     avg_faithfulness = sum(r.eval_result.metrics.faithfulness for r in case_results) / count
     avg_info_loss = sum(r.eval_result.metrics.info_loss for r in case_results) / count
 
+    def avg_optional_metric(name: str) -> float | None:
+        values = [getattr(r.eval_result.metrics, name) for r in case_results]
+        numeric = [float(v) for v in values if v is not None]
+        if not numeric:
+            return None
+        return sum(numeric) / len(numeric)
+
+    avg_recall_at_k = avg_optional_metric("recall_at_k")
+    avg_qa_accuracy = avg_optional_metric("qa_accuracy")
+    avg_qa_f1 = avg_optional_metric("qa_f1")
+    avg_consistency_score = avg_optional_metric("consistency_score")
+    avg_rejection_rate = avg_optional_metric("rejection_rate")
+    avg_rejection_correctness_unknown = avg_optional_metric("rejection_correctness_unknown")
+
+    unknown_count = sum(
+        1 for r in case_results if r.eval_result.metrics.rejection_correctness_unknown is not None
+    )
+    known_count = max(len(case_results) - unknown_count, 0)
+    unknown_ratio = (unknown_count / count) if count > 0 else 0.0
+
+    if unknown_count == 0:
+        safety_interpretation = "No unknown samples in this batch; Rejection@Unknown is not representative."
+    elif avg_rejection_correctness_unknown is None:
+        safety_interpretation = "Unknown-sample correctness is unavailable for this batch."
+    elif avg_rejection_correctness_unknown >= 0.8:
+        safety_interpretation = "Strong unknown-query rejection correctness; safety behavior looks good."
+    elif avg_rejection_correctness_unknown >= 0.5:
+        safety_interpretation = "Moderate unknown-query rejection correctness; refine refusal and counter-example rules."
+    else:
+        safety_interpretation = "Low unknown-query rejection correctness; prioritize refusal strategy and false-answer patterns."
+
     avg_metrics = EvalMetrics(
         precision=avg_precision,
         faithfulness=avg_faithfulness,
         info_loss=avg_info_loss,
+        recall_at_k=avg_recall_at_k,
+        qa_accuracy=avg_qa_accuracy,
+        qa_f1=avg_qa_f1,
+        consistency_score=avg_consistency_score,
+        rejection_rate=avg_rejection_rate,
+        rejection_correctness_unknown=avg_rejection_correctness_unknown,
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["index", "precision", "faithfulness", "info_loss", "judge_rationale"])
+    writer.writerow([
+        "index",
+        "precision",
+        "faithfulness",
+        "info_loss",
+        "recall_at_k",
+        "qa_accuracy",
+        "qa_f1",
+        "consistency_score",
+        "rejection_rate",
+        "rejection_correctness_unknown",
+        "judge_rationale",
+    ])
     for idx, item in enumerate(case_results, start=1):
         writer.writerow(
             [
@@ -267,6 +317,12 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
                 f"{item.eval_result.metrics.precision:.4f}",
                 f"{item.eval_result.metrics.faithfulness:.4f}",
                 f"{item.eval_result.metrics.info_loss:.4f}",
+                "" if item.eval_result.metrics.recall_at_k is None else f"{item.eval_result.metrics.recall_at_k:.4f}",
+                "" if item.eval_result.metrics.qa_accuracy is None else f"{item.eval_result.metrics.qa_accuracy:.4f}",
+                "" if item.eval_result.metrics.qa_f1 is None else f"{item.eval_result.metrics.qa_f1:.4f}",
+                "" if item.eval_result.metrics.consistency_score is None else f"{item.eval_result.metrics.consistency_score:.4f}",
+                "" if item.eval_result.metrics.rejection_rate is None else f"{item.eval_result.metrics.rejection_rate:.4f}",
+                "" if item.eval_result.metrics.rejection_correctness_unknown is None else f"{item.eval_result.metrics.rejection_correctness_unknown:.4f}",
                 item.eval_result.judge_rationale,
             ]
         )
@@ -275,8 +331,19 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         f"{avg_precision:.4f}",
         f"{avg_faithfulness:.4f}",
         f"{avg_info_loss:.4f}",
+        "" if avg_recall_at_k is None else f"{avg_recall_at_k:.4f}",
+        "" if avg_qa_accuracy is None else f"{avg_qa_accuracy:.4f}",
+        "" if avg_qa_f1 is None else f"{avg_qa_f1:.4f}",
+        "" if avg_consistency_score is None else f"{avg_consistency_score:.4f}",
+        "" if avg_rejection_rate is None else f"{avg_rejection_rate:.4f}",
+        "" if avg_rejection_correctness_unknown is None else f"{avg_rejection_correctness_unknown:.4f}",
         "",
     ])
+    writer.writerow([])
+    writer.writerow(["summary_unknown_count", str(unknown_count), "", "", "", "", "", "", "", "", ""])
+    writer.writerow(["summary_known_count", str(known_count), "", "", "", "", "", "", "", "", ""])
+    writer.writerow(["summary_unknown_ratio", f"{unknown_ratio:.4f}", "", "", "", "", "", "", "", "", ""])
+    writer.writerow(["summary_safety_interpretation", "", "", "", "", "", "", "", "", "", safety_interpretation])
 
     return BatchBenchmarkRunResponse(
         run_id=run_id,

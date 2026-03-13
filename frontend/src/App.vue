@@ -46,6 +46,7 @@ const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
 const maxConcurrency = ref(3);
+const batchCaseCount = ref(5);
 const requestTimeoutMs = ref(120000);
 const progressText = ref('');
 const elapsedMs = ref(0);
@@ -60,6 +61,17 @@ const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
 const providers = ['api', 'ollama', 'local'] as const;
 const computeDevices = ['cpu', 'cuda'] as const;
+
+const usingUploadedBatchCases = computed(() => datasetCases.value.length > 0);
+const plannedBatchCaseCount = computed(() => {
+  if (usingUploadedBatchCases.value) {
+    return datasetCases.value.length;
+  }
+  return Math.max(1, Math.min(200, Number(batchCaseCount.value) || 1));
+});
+const batchInputModeLabel = computed(() =>
+  usingUploadedBatchCases.value ? 'JSON 上传测试集模式' : '单条输入自动生成模式'
+);
 
 function startRunTimer() {
   stopRunTimer();
@@ -118,7 +130,52 @@ const singleDerivedRows = computed(() => {
       ? result.value.search_result.hits.reduce((sum, hit) => sum + hit.relevance, 0) / hitCount
       : 0;
 
+  const extraRows: Array<{ label: string; value: string; hint: string }> = [];
+  if (result.value.eval_result.metrics.recall_at_k != null) {
+    extraRows.push({
+      label: 'Recall@K',
+      value: `${(result.value.eval_result.metrics.recall_at_k * 100).toFixed(1)}%`,
+      hint: '检索结果中命中目标事实的召回能力。'
+    });
+  }
+  if (result.value.eval_result.metrics.qa_accuracy != null) {
+    extraRows.push({
+      label: 'QA Accuracy',
+      value: `${(result.value.eval_result.metrics.qa_accuracy * 100).toFixed(1)}%`,
+      hint: '回答是否完整覆盖目标事实（样本级）。'
+    });
+  }
+  if (result.value.eval_result.metrics.qa_f1 != null) {
+    extraRows.push({
+      label: 'QA F1',
+      value: `${(result.value.eval_result.metrics.qa_f1 * 100).toFixed(1)}%`,
+      hint: '回答文本与目标事实的重叠平衡分。'
+    });
+  }
+  if (result.value.eval_result.metrics.consistency_score != null) {
+    extraRows.push({
+      label: 'Consistency Score',
+      value: `${(result.value.eval_result.metrics.consistency_score * 100).toFixed(1)}%`,
+      hint: '回答是否与已知事实自洽，越高越稳定。'
+    });
+  }
+  if (result.value.eval_result.metrics.rejection_rate != null) {
+    extraRows.push({
+      label: 'Rejection Rate',
+      value: `${(result.value.eval_result.metrics.rejection_rate * 100).toFixed(1)}%`,
+      hint: '模型实际拒答行为比例（行为信号，不代表是否拒答正确）。'
+    });
+  }
+  if (result.value.eval_result.metrics.rejection_correctness_unknown != null) {
+    extraRows.push({
+      label: 'Rejection@Unknown',
+      value: `${(result.value.eval_result.metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
+      hint: '仅在未知问题子集统计：拒答是否正确。'
+    });
+  }
+
   return [
+    ...extraRows,
     { label: 'F1 (P&R Balance)', value: `${(f1 * 100).toFixed(1)}%`, hint: '平衡精确率与覆盖率，避免只高其一。' },
     { label: 'Retention (1-InfoLoss)', value: `${(retention * 100).toFixed(1)}%`, hint: '保真保留程度，越高越好。' },
     { label: 'Hallucination Risk (1-P)', value: `${(hallucinationRisk * 100).toFixed(1)}%`, hint: '检索噪声或幻觉风险，越低越好。' },
@@ -158,13 +215,115 @@ const batchDerivedRows = computed(() => {
   const passRate = passCount / cases.length;
   const worstF1 = sortedF1[0];
 
+  const extraRows: Array<{ label: string; value: string; hint: string }> = [];
+  if (batchResult.value.avg_metrics.recall_at_k != null) {
+    extraRows.push({
+      label: 'Avg Recall@K',
+      value: `${(batchResult.value.avg_metrics.recall_at_k * 100).toFixed(1)}%`,
+      hint: '批量平均检索召回能力。'
+    });
+  }
+  if (batchResult.value.avg_metrics.qa_accuracy != null) {
+    extraRows.push({
+      label: 'Avg QA Accuracy',
+      value: `${(batchResult.value.avg_metrics.qa_accuracy * 100).toFixed(1)}%`,
+      hint: '批量平均回答正确覆盖率。'
+    });
+  }
+  if (batchResult.value.avg_metrics.qa_f1 != null) {
+    extraRows.push({
+      label: 'Avg QA F1',
+      value: `${(batchResult.value.avg_metrics.qa_f1 * 100).toFixed(1)}%`,
+      hint: '批量平均回答语义重叠得分。'
+    });
+  }
+  if (batchResult.value.avg_metrics.consistency_score != null) {
+    extraRows.push({
+      label: 'Avg Consistency Score',
+      value: `${(batchResult.value.avg_metrics.consistency_score * 100).toFixed(1)}%`,
+      hint: '批量平均一致性表现。'
+    });
+  }
+  if (batchResult.value.avg_metrics.rejection_rate != null) {
+    extraRows.push({
+      label: 'Avg Rejection Rate',
+      value: `${(batchResult.value.avg_metrics.rejection_rate * 100).toFixed(1)}%`,
+      hint: '批量实际拒答行为比例（行为信号）。'
+    });
+  }
+  if (batchResult.value.avg_metrics.rejection_correctness_unknown != null) {
+    extraRows.push({
+      label: 'Avg Rejection@Unknown',
+      value: `${(batchResult.value.avg_metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
+      hint: '仅未知问题子集统计的批量拒答正确率。'
+    });
+  }
+
   return [
+    ...extraRows,
     { label: 'Pass Rate (P>=0.8/F>=0.8/L<=0.2)', value: `${(passRate * 100).toFixed(1)}%`, hint: '达标样本比例，避免只看均值。' },
     { label: 'Mean F1', value: `${(meanF1 * 100).toFixed(1)}%`, hint: '批量整体平衡表现。' },
     { label: 'Median F1', value: `${(medianF1 * 100).toFixed(1)}%`, hint: '中位水平，降低极端值影响。' },
     { label: 'Worst-case F1', value: `${(worstF1 * 100).toFixed(1)}%`, hint: '最差样本性能，反映可靠性下限。' },
     { label: 'Std(P/F/L)', value: `${precisionStd.toFixed(3)} / ${faithfulnessStd.toFixed(3)} / ${infoLossStd.toFixed(3)}`, hint: '波动越小说明系统越稳定。' }
   ];
+});
+
+const singleSafetySignals = computed(() => {
+  if (!result.value) {
+    return null;
+  }
+  const m = result.value.eval_result.metrics;
+  if (m.rejection_rate == null && m.rejection_correctness_unknown == null) {
+    return null;
+  }
+  return {
+    rejectionRate: m.rejection_rate,
+    rejectionUnknownCorrectness: m.rejection_correctness_unknown
+  };
+});
+
+const batchSafetySignals = computed(() => {
+  if (!batchResult.value) {
+    return null;
+  }
+  const m = batchResult.value.avg_metrics;
+  const unknownCount = batchResult.value.case_results.filter(
+    (r) => r.eval_result.metrics.rejection_correctness_unknown != null
+  ).length;
+  const knownCount = batchResult.value.case_results.length - unknownCount;
+
+  if (m.rejection_rate == null && m.rejection_correctness_unknown == null) {
+    return null;
+  }
+
+  return {
+    rejectionRate: m.rejection_rate,
+    rejectionUnknownCorrectness: m.rejection_correctness_unknown,
+    unknownCount,
+    knownCount,
+    unknownRatio: batchResult.value.case_results.length > 0 ? unknownCount / batchResult.value.case_results.length : 0
+  };
+});
+
+const batchSafetyInterpretation = computed(() => {
+  if (!batchSafetySignals.value) {
+    return '';
+  }
+  const s = batchSafetySignals.value;
+  if (s.unknownCount === 0) {
+    return '当前批次没有未知样本，Rejection@Unknown 不具代表性。';
+  }
+  if (s.rejectionUnknownCorrectness == null) {
+    return '当前批次缺少可用的未知样本正确率统计。';
+  }
+  if (s.rejectionUnknownCorrectness >= 0.8) {
+    return '未知问题拒答正确率较高，安全性表现良好。';
+  }
+  if (s.rejectionUnknownCorrectness >= 0.5) {
+    return '未知问题拒答正确率中等，建议继续优化拒答模板与反例库。';
+  }
+  return '未知问题拒答正确率偏低，建议优先排查误答模式与拒答策略。';
 });
 
 onBeforeUnmount(() => {
@@ -257,11 +416,27 @@ async function onRunBatchBenchmark() {
   startRunTimer();
 
   try {
-    if (datasetCases.value.length === 0) {
-      throw new Error('请先上传 JSON 数组测试集。');
+    const expectedFacts = expectedFactsRaw.value
+      .split('\n')
+      .map((v: string) => v.trim())
+      .filter(Boolean);
+
+    const useUploadedCases = datasetCases.value.length > 0;
+    if (!useUploadedCases && !inputText.value.trim()) {
+      throw new Error('请填写单条输入，或上传 JSON 数组测试集。');
     }
 
-    progressText.value = `Batch Progress: 0/${datasetCases.value.length} (submitting)`;
+    const generatedCaseCount = Math.max(1, Math.min(200, Number(batchCaseCount.value) || 1));
+    const generatedCases = Array.from({ length: generatedCaseCount }, (_, idx) => ({
+      case_id: `generated-${idx + 1}`,
+      input_text: inputText.value,
+      expected_facts: expectedFacts,
+      session_id: 'batch-session'
+    }));
+
+    const casesToRun = useUploadedCases ? datasetCases.value : generatedCases;
+
+    progressText.value = `Batch Progress: 0/${casesToRun.length} (submitting)`;
 
     const startResp = await runBatchBenchmarkAsync({
       config: config.value,
@@ -275,10 +450,10 @@ async function onRunBatchBenchmark() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value
       },
-      cases: datasetCases.value
+      cases: casesToRun
     }, requestTimeoutMs.value);
 
-    progressText.value = `Batch Progress: 0/${datasetCases.value.length} (queued)`;
+    progressText.value = `Batch Progress: 0/${casesToRun.length} (queued)`;
 
     while (true) {
       const status = await getAsyncRunStatus(startResp.run_id, requestTimeoutMs.value);
@@ -473,6 +648,13 @@ function downloadCsvReport() {
             <span>上传 JSON 测试集 (可选)</span>
             <input type="file" accept="application/json" class="input-file" @change="handleDatasetUpload" />
           </label>
+          <label class="field">
+            <span>Batch Case Count（未上传 JSON 时生效）</span>
+            <input v-model.number="batchCaseCount" type="number" min="1" max="200" class="select" />
+          </label>
+          <p class="text-xs text-slate-400">
+            未上传 JSON 时，Run Batch 会使用“单条输入 + Expected Facts”自动生成 N 条测试样本。
+          </p>
 
           <div class="rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
             <p class="mb-2 text-xs font-semibold text-arena-mint">内置数据集</p>
@@ -511,6 +693,9 @@ function downloadCsvReport() {
 
         <div class="mt-5">
           <p class="mb-2 text-sm font-semibold text-slate-300">Execution</p>
+          <p class="mb-2 rounded-lg border border-slate-600/60 bg-slate-900/50 p-2 text-xs text-slate-300">
+            Run Batch 输入模式：{{ batchInputModeLabel }}，本次将运行 {{ plannedBatchCaseCount }} 条 case。
+          </p>
           <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
             <button class="run-btn w-full" :disabled="loading" @click="onRunBenchmark">
               {{ loading ? 'Running...' : 'Run Benchmark' }}
@@ -540,9 +725,33 @@ function downloadCsvReport() {
 
       <section class="panel lg:col-span-1">
         <h2 class="panel-title">Results Dashboard</h2>
+        <p
+          class="mb-3 rounded-lg border border-slate-600/60 bg-slate-900/50 p-2 text-xs text-slate-300"
+          title="LLM Judge: Precision/Faithfulness/InfoLoss。&#10;规则法: Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown。"
+        >
+          评测口径：Precision/Faithfulness/InfoLoss 由 LLM Judge 给分；Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown 为规则法自动评估。
+        </p>
 
         <div v-if="result" class="space-y-4">
           <MetricBars :metrics="result.eval_result.metrics" />
+
+          <div v-if="singleSafetySignals" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Safety Signals: Behavior vs Correctness</h3>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">Rejection Rate（行为率）</p>
+                <p class="mt-1 text-xs text-arena-mint">
+                  {{ singleSafetySignals.rejectionRate == null ? 'N/A' : `${(singleSafetySignals.rejectionRate * 100).toFixed(1)}%` }}
+                </p>
+              </div>
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">Rejection@Unknown（正确率）</p>
+                <p class="mt-1 text-xs text-arena-mint">
+                  {{ singleSafetySignals.rejectionUnknownCorrectness == null ? 'N/A（仅未知样本）' : `${(singleSafetySignals.rejectionUnknownCorrectness * 100).toFixed(1)}%` }}
+                </p>
+              </div>
+            </div>
+          </div>
 
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Additional Signals</h3>
@@ -575,6 +784,32 @@ function downloadCsvReport() {
 
         <div v-else-if="batchResult" class="space-y-4">
           <MetricBars :metrics="batchResult.avg_metrics" />
+          <div v-if="batchSafetySignals" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Safety Signals: Behavior vs Correctness</h3>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">Avg Rejection Rate（行为率）</p>
+                <p class="mt-1 text-xs text-arena-mint">
+                  {{ batchSafetySignals.rejectionRate == null ? 'N/A' : `${(batchSafetySignals.rejectionRate * 100).toFixed(1)}%` }}
+                </p>
+              </div>
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">Avg Rejection@Unknown（正确率）</p>
+                <p class="mt-1 text-xs text-arena-mint">
+                  {{ batchSafetySignals.rejectionUnknownCorrectness == null ? 'N/A（仅未知样本）' : `${(batchSafetySignals.rejectionUnknownCorrectness * 100).toFixed(1)}%` }}
+                </p>
+              </div>
+            </div>
+            <p class="mt-2 text-[11px] text-slate-400">
+              样本分布：Unknown {{ batchSafetySignals.unknownCount }} / Known {{ batchSafetySignals.knownCount }}
+            </p>
+            <p class="mt-1 text-[11px] text-slate-400">
+              Unknown 占比：{{ (batchSafetySignals.unknownRatio * 100).toFixed(1) }}%
+            </p>
+            <p class="mt-2 rounded-md border border-slate-700/60 bg-slate-900/40 p-2 text-[11px] text-slate-300">
+              解读建议：{{ batchSafetyInterpretation }}
+            </p>
+          </div>
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Stability & Robustness</h3>
             <div class="space-y-2">
