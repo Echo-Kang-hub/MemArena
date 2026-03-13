@@ -83,3 +83,17 @@ export interface DatasetSummary {
   file: string;
   count: number;
 }
+
+export interface AsyncRunStartResponse {
+  run_id: string;
+  status: string;
+}
+
+export interface AsyncRunStatusResponse {
+  run_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'not_found' | string;
+  completed: number;
+  total: number;
+  message: string;
+  result?: BatchBenchmarkRunResponse | null;
+}

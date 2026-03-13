@@ -56,7 +56,11 @@ class LLMJudgeBench(EvaluationBench):
             f"Assembled Prompt: {request.assembled_prompt[:1200]}\n"
         )
 
-        raw = self.llm_client.generate(judge_prompt, system_prompt="You are a strict evaluator.")
+        raw = self.llm_client.generate(
+            judge_prompt,
+            system_prompt="You are a strict evaluator.",
+            purpose="judge",
+        )
         parsed = self._extract_json(raw)
         if not parsed:
             return self._fallback_eval(request)

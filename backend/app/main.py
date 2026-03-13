@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 from uuid import uuid4
@@ -17,6 +18,8 @@ from app.models.contracts import (
     BatchBenchmarkRunRequest,
     BatchBenchmarkRunResponse,
     DatasetRunRequest,
+    AsyncRunStartResponse,
+    AsyncRunStatusResponse,
     EvalMetrics,
     EngineSaveRequest,
     EngineSearchRequest,
@@ -25,10 +28,19 @@ from app.models.contracts import (
     RawConversationInput,
     ReflectRequest,
 )
+from app.services.request_audit import (
+    query_audit_events,
+    reset_audit_run_id,
+    set_audit_run_id,
+    write_audit_event,
+)
 from app.services.dataset_loader import list_datasets, load_dataset_cases
 from app.registry import build_assembler, build_engine, build_processor, build_reflector
 
 app = FastAPI(title="MemArena Backend", version="0.1.0")
+
+# 轻量内存任务状态表：用于前端轮询批量任务进度
+RUN_STATES: dict[str, dict] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,108 +75,126 @@ def datasets() -> dict:
 
 async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = None) -> BenchmarkRunResponse:
     cur_run_id = run_id or str(uuid4())
-
-    # 初始化模型工厂，用于引擎检索和 LLM-as-a-Judge
-    llm_client = ProviderFactory.build_llm(payload.config.llm_provider)
-    embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider)
-
-    processor = build_processor(payload.config.processor)
-    engine = build_engine(
-        payload.config.engine,
-        embedding_client=embedding_client,
-        collection_name=payload.retrieval.collection_name,
-    )
-    assembler = build_assembler(payload.config.assembler)
-    reflector = build_reflector(payload.config.reflector)
-    bench = LLMJudgeBench(llm_client=llm_client)
-
-    raw_input = RawConversationInput(
-        session_id=payload.session_id,
-        user_id=payload.user_id,
-        message=payload.input_text,
-        metadata={
-            "llm_preview": llm_client.generate("provider handshake"),
-            "embedding_preview": embedding_client.embed(payload.input_text),
+    token = set_audit_run_id(cur_run_id)
+    write_audit_event(
+        "run_single_start",
+        {
+            "run_id": cur_run_id,
+            "session_id": payload.session_id,
+            "user_id": payload.user_id,
+            "config": payload.config.model_dump(),
+            "retrieval": payload.retrieval.model_dump(),
         },
     )
 
-    processor_output = processor.process(raw_input)
-    save_result = engine.save(EngineSaveRequest(source=processor_output.source, chunks=processor_output.chunks))
+    try:
+        # 初始化模型工厂，用于引擎检索和 LLM-as-a-Judge
+        llm_client = ProviderFactory.build_chat_llm(payload.config.llm_provider)
+        judge_llm_client = ProviderFactory.build_judge_llm()
+        embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider)
 
-    search_result = engine.search(
-        EngineSearchRequest(
+        processor = build_processor(payload.config.processor)
+        engine = build_engine(
+            payload.config.engine,
+            embedding_client=embedding_client,
+            collection_name=payload.retrieval.collection_name,
+        )
+        assembler = build_assembler(payload.config.assembler)
+        reflector = build_reflector(payload.config.reflector)
+        bench = LLMJudgeBench(llm_client=judge_llm_client)
+
+        raw_input = RawConversationInput(
             session_id=payload.session_id,
-            query=payload.input_text,
-            top_k=payload.retrieval.top_k,
-            filters={
-                "min_relevance": payload.retrieval.min_relevance,
-                "collection_name": payload.retrieval.collection_name,
-                "similarity_strategy": payload.retrieval.similarity_strategy,
-                "keyword_rerank": payload.retrieval.keyword_rerank,
+            user_id=payload.user_id,
+            message=payload.input_text,
+            metadata={
+                "llm_preview": llm_client.generate("provider handshake", purpose="chat_handshake"),
+                "embedding_preview": embedding_client.embed(payload.input_text),
             },
         )
-    )
 
-    assemble_result = assembler.assemble(
-        AssembleRequest(user_query=payload.input_text, memory_hits=search_result.hits)
-    )
+        processor_output = processor.process(raw_input)
+        save_result = engine.save(EngineSaveRequest(source=processor_output.source, chunks=processor_output.chunks))
 
-    eval_result = bench.evaluate(
-        EvalRequest(
-            run_id=cur_run_id,
-            assembled_prompt=assemble_result.prompt,
-            retrieved=search_result.hits,
-            expected_facts=payload.expected_facts,
-        )
-    )
-
-    reflector_result = None
-    if reflector is not None:
-        reflector_result = await reflector.reflect(
-            ReflectRequest(
+        search_result = engine.search(
+            EngineSearchRequest(
                 session_id=payload.session_id,
-                latest_query=payload.input_text,
-                memory_hits=search_result.hits,
+                query=payload.input_text,
+                top_k=payload.retrieval.top_k,
+                filters={
+                    "min_relevance": payload.retrieval.min_relevance,
+                    "collection_name": payload.retrieval.collection_name,
+                    "similarity_strategy": payload.retrieval.similarity_strategy,
+                    "keyword_rerank": payload.retrieval.keyword_rerank,
+                },
             )
         )
 
-    return BenchmarkRunResponse(
-        run_id=cur_run_id,
-        config=payload.config,
-        save_result=save_result,
-        search_result=search_result,
-        assemble_result=assemble_result,
-        eval_result=eval_result,
-        reflector_result=reflector_result,
-    )
-
-
-@app.post("/api/benchmark/run", response_model=BenchmarkRunResponse)
-async def run_benchmark(payload: BenchmarkRunRequest) -> BenchmarkRunResponse:
-    return await _execute_single(payload=payload)
-
-
-@app.post("/api/benchmark/run-batch", response_model=BatchBenchmarkRunResponse)
-async def run_batch_benchmark(payload: BatchBenchmarkRunRequest) -> BatchBenchmarkRunResponse:
-    run_id = str(uuid4())
-    case_results: list[BenchmarkRunResponse] = []
-
-    for case in payload.cases:
-        session_id = case.session_id
-        if payload.isolate_sessions:
-            session_id = f"{run_id}-{case.case_id}"
-
-        single_req = BenchmarkRunRequest(
-            config=payload.config,
-            session_id=session_id,
-            user_id=payload.user_id,
-            input_text=case.input_text,
-            expected_facts=case.expected_facts,
-            retrieval=payload.retrieval,
+        assemble_result = assembler.assemble(
+            AssembleRequest(user_query=payload.input_text, memory_hits=search_result.hits)
         )
-        result = await _execute_single(payload=single_req, run_id=run_id)
-        case_results.append(result)
 
+        # 显式执行一次聊天模型生成，确保 chat LLM 与 judge LLM 真实解耦并可观测。
+        agent_response = llm_client.generate(
+            assemble_result.prompt,
+            system_prompt="你是一个可靠的 AI 助手。",
+            purpose="chat_response",
+        )
+
+        eval_result = bench.evaluate(
+            EvalRequest(
+                run_id=cur_run_id,
+                assembled_prompt=assemble_result.prompt,
+                retrieved=search_result.hits,
+                expected_facts=payload.expected_facts,
+            )
+        )
+
+        reflector_result = None
+        if reflector is not None:
+            reflector_result = await reflector.reflect(
+                ReflectRequest(
+                    session_id=payload.session_id,
+                    latest_query=payload.input_text,
+                    memory_hits=search_result.hits,
+                )
+            )
+
+        response = BenchmarkRunResponse(
+            run_id=cur_run_id,
+            config=payload.config,
+            save_result=save_result,
+            search_result=search_result,
+            assemble_result=assemble_result,
+            eval_result=eval_result,
+            reflector_result=reflector_result,
+        )
+        write_audit_event(
+            "run_single_success",
+            {
+                "run_id": cur_run_id,
+                "session_id": payload.session_id,
+                "hits": len(search_result.hits),
+                "agent_response_preview": agent_response[:200],
+                "metrics": response.eval_result.metrics.model_dump(),
+            },
+        )
+        return response
+    except Exception as exc:
+        write_audit_event(
+            "run_single_failed",
+            {
+                "run_id": cur_run_id,
+                "session_id": payload.session_id,
+                "error": str(exc),
+            },
+        )
+        raise
+    finally:
+        reset_audit_run_id(token)
+
+
+def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse]) -> BatchBenchmarkRunResponse:
     count = max(len(case_results), 1)
     avg_precision = sum(r.eval_result.metrics.precision for r in case_results) / count
     avg_faithfulness = sum(r.eval_result.metrics.faithfulness for r in case_results) / count
@@ -205,6 +235,103 @@ async def run_batch_benchmark(payload: BatchBenchmarkRunRequest) -> BatchBenchma
     )
 
 
+async def _execute_batch(run_id: str, payload: BatchBenchmarkRunRequest, track_progress: bool = False) -> BatchBenchmarkRunResponse:
+    case_results: list[BenchmarkRunResponse] = []
+    write_audit_event(
+        "run_batch_start",
+        {
+            "run_id": run_id,
+            "user_id": payload.user_id,
+            "total": len(payload.cases),
+            "isolate_sessions": payload.isolate_sessions,
+            "config": payload.config.model_dump(),
+            "retrieval": payload.retrieval.model_dump(),
+        },
+    )
+
+    if track_progress:
+        RUN_STATES[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "completed": 0,
+            "total": len(payload.cases),
+            "message": "任务开始执行",
+            "result": None,
+        }
+
+    for idx, case in enumerate(payload.cases, start=1):
+        session_id = case.session_id
+        if payload.isolate_sessions:
+            session_id = f"{run_id}-{case.case_id}"
+
+        if track_progress:
+            RUN_STATES[run_id]["message"] = f"正在运行 case {idx}/{len(payload.cases)}"
+
+        single_req = BenchmarkRunRequest(
+            config=payload.config,
+            session_id=session_id,
+            user_id=payload.user_id,
+            input_text=case.input_text,
+            expected_facts=case.expected_facts,
+            retrieval=payload.retrieval,
+        )
+        result = await _execute_single(payload=single_req, run_id=run_id)
+        case_results.append(result)
+
+        if track_progress:
+            RUN_STATES[run_id]["completed"] = idx
+
+    batch_result = _build_batch_response(run_id=run_id, case_results=case_results)
+    write_audit_event(
+        "run_batch_success",
+        {
+            "run_id": run_id,
+            "completed": len(case_results),
+            "avg_metrics": batch_result.avg_metrics.model_dump(),
+        },
+    )
+
+    if track_progress:
+        RUN_STATES[run_id]["status"] = "completed"
+        RUN_STATES[run_id]["message"] = "任务完成"
+        RUN_STATES[run_id]["result"] = batch_result
+
+    return batch_result
+
+
+async def _run_batch_background(run_id: str, payload: BatchBenchmarkRunRequest) -> None:
+    try:
+        await _execute_batch(run_id=run_id, payload=payload, track_progress=True)
+    except Exception as exc:
+        write_audit_event(
+            "run_batch_failed",
+            {
+                "run_id": run_id,
+                "error": str(exc),
+            },
+        )
+        state = RUN_STATES.get(run_id, {})
+        state.update(
+            {
+                "run_id": run_id,
+                "status": "failed",
+                "message": f"任务失败: {exc}",
+            }
+        )
+        RUN_STATES[run_id] = state
+
+
+@app.post("/api/benchmark/run", response_model=BenchmarkRunResponse)
+async def run_benchmark(payload: BenchmarkRunRequest) -> BenchmarkRunResponse:
+    return await _execute_single(payload=payload)
+
+
+@app.post("/api/benchmark/run-batch", response_model=BatchBenchmarkRunResponse)
+async def run_batch_benchmark(payload: BatchBenchmarkRunRequest) -> BatchBenchmarkRunResponse:
+    run_id = str(uuid4())
+    return await _execute_batch(run_id=run_id, payload=payload, track_progress=False)
+
+
 @app.post("/api/benchmark/run-dataset", response_model=BatchBenchmarkRunResponse)
 async def run_dataset_benchmark(payload: DatasetRunRequest) -> BatchBenchmarkRunResponse:
     all_cases = load_dataset_cases(payload.dataset_name)
@@ -220,6 +347,64 @@ async def run_dataset_benchmark(payload: DatasetRunRequest) -> BatchBenchmarkRun
         isolate_sessions=payload.isolate_sessions,
     )
     return await run_batch_benchmark(batch_req)
+
+
+@app.post("/api/benchmark/run-batch-async", response_model=AsyncRunStartResponse)
+async def run_batch_benchmark_async(payload: BatchBenchmarkRunRequest) -> AsyncRunStartResponse:
+    run_id = str(uuid4())
+    RUN_STATES[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "completed": 0,
+        "total": len(payload.cases),
+        "message": "任务已入队",
+        "result": None,
+    }
+    asyncio.create_task(_run_batch_background(run_id, payload))
+    return AsyncRunStartResponse(run_id=run_id, status="queued")
+
+
+@app.post("/api/benchmark/run-dataset-async", response_model=AsyncRunStartResponse)
+async def run_dataset_benchmark_async(payload: DatasetRunRequest) -> AsyncRunStartResponse:
+    all_cases = load_dataset_cases(payload.dataset_name)
+    start = payload.start_index
+    end = min(start + payload.sample_size, len(all_cases))
+    selected_cases = all_cases[start:end]
+
+    batch_req = BatchBenchmarkRunRequest(
+        config=payload.config,
+        retrieval=payload.retrieval,
+        user_id=payload.user_id,
+        cases=selected_cases,
+        isolate_sessions=payload.isolate_sessions,
+    )
+    return await run_batch_benchmark_async(batch_req)
+
+
+@app.get("/api/benchmark/runs/{run_id}", response_model=AsyncRunStatusResponse)
+def get_async_run_status(run_id: str) -> AsyncRunStatusResponse:
+    state = RUN_STATES.get(run_id)
+    if not state:
+        return AsyncRunStatusResponse(run_id=run_id, status="not_found", completed=0, total=0, message="任务不存在")
+
+    return AsyncRunStatusResponse(
+        run_id=run_id,
+        status=str(state.get("status", "unknown")),
+        completed=int(state.get("completed", 0)),
+        total=int(state.get("total", 0)),
+        message=str(state.get("message", "")),
+        result=state.get("result"),
+    )
+
+
+@app.get("/api/audit/runs/{run_id}")
+def get_audit_events_by_run(run_id: str, limit: int = 200) -> dict:
+    events = query_audit_events(run_id=run_id, limit=limit)
+    return {
+        "run_id": run_id,
+        "count": len(events),
+        "events": events,
+    }
 
 
 @app.get("/")

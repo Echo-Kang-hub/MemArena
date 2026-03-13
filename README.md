@@ -119,16 +119,25 @@ docker compose up --build
 
 ## .env 填写规则
 - 建议保留所有键名，不要删除；未使用的 provider 填空值即可。
-- 若当前使用 API 作为 LLM：
-  - 需要填写 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_CHAT_MODEL`。
-  - `ANTHROPIC_*` 可留空。
-  - `OLLAMA_LLM_MODEL` 可留空或保留默认值（不生效）。
+- 聊天模型与评测模型建议按功能分开配置：
+  - `CHAT_*` 控制聊天链路模型。
+  - `JUDGE_*` 控制 LLM-as-a-Judge 模型。
+  - 两者可配置成不同 provider 和不同模型。
+- 若 `CHAT_*` 或 `JUDGE_*` 留空，系统会回退到兼容键（如 `OPENAI_*` / `OLLAMA_*`）。
 - 若 embedding 使用 Ollama：
   - 需要填写 `OLLAMA_BASE_URL` 与 `OLLAMA_EMBED_MODEL`。
   - `LOCAL_EMBED_MODEL_PATH` 可留空。
 - Chroma 相关：
   - `CHROMA_PERSIST_DIR` 为持久化目录。
   - `CHROMA_COLLECTION_NAME` 为默认集合名。
+
+## 运行数据与审计日志
+- 运行期数据统一放在项目根目录 `data/`，默认包括：
+  - `data/memarena.db`（SQLite）
+  - `data/chroma/`（Chroma 持久化）
+  - `data/logs/request_audit.jsonl`（模型请求审计日志）
+- `data/` 已在 `.gitignore` 中忽略，不会进入版本库。
+- 当模型调用失败时，可优先检查 `request_audit.jsonl` 中同一 `event` 的失败记录，定位 provider、模型、耗时与错误信息。
 
 ## 可选 Memory 方案说明
 - 全量方案目录与解释见 `docs/memory_modules_catalog.md`。
@@ -152,6 +161,10 @@ docker compose up --build
 - `POST /api/benchmark/run`：单条评测。
 - `POST /api/benchmark/run-batch`：批量评测，返回 `avg_metrics` 与 `csv_report`。
 - `POST /api/benchmark/run-dataset`：运行内置数据集，可指定 `sample_size/start_index`。
+- `POST /api/benchmark/run-batch-async`：异步批量任务（适合大数据量）。
+- `POST /api/benchmark/run-dataset-async`：异步内置数据集任务。
+- `GET /api/benchmark/runs/{run_id}`：查询任务进度（`completed/total`）和最终结果。
+- `GET /api/audit/runs/{run_id}`：按 run_id 查询请求审计日志（支持 `limit` 参数）。
 - `GET /api/datasets`：查看内置数据集及条目数。
 - `GET /api/options`：可选模块与检索策略枚举。
 
@@ -159,5 +172,6 @@ docker compose up --build
 - 将下载的数据集文件放到 `backend/datasets/`，格式为 JSON 数组。
 - 前端可直接选择内置数据集，并设置运行条数（Sample Size）与起始位置（Start Index）。
 - 每个测试默认可独立会话运行（避免样本间记忆干扰）。
+- 前端支持配置请求超时（ms），并在异步批量任务中显示真实进度 x/y。
 
 更多说明见：`docs/datasets.md`

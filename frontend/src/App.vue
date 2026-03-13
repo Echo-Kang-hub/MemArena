@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import MetricBars from './components/MetricBars.vue';
-import { listDatasets, runBatchBenchmark, runBenchmark, runDatasetBenchmark } from './api/client';
+import {
+  getAsyncRunStatus,
+  listDatasets,
+  runBatchBenchmarkAsync,
+  runBenchmarkWithTimeout,
+  runDatasetBenchmarkAsync
+} from './api/client';
 import type {
   BatchBenchmarkRunResponse,
   BenchmarkConfig,
@@ -36,6 +42,8 @@ const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
+const requestTimeoutMs = ref(120000);
+const progressText = ref('');
 
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'] as const;
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
@@ -87,6 +95,7 @@ async function onRunBenchmark() {
   loading.value = true;
   error.value = '';
   batchResult.value = null;
+  progressText.value = '';
 
   try {
     const expectedFacts = expectedFactsRaw.value
@@ -94,7 +103,7 @@ async function onRunBenchmark() {
       .map((v: string) => v.trim())
       .filter(Boolean);
 
-    result.value = await runBenchmark({
+    result.value = await runBenchmarkWithTimeout({
       config: config.value,
       session_id: 'ui-session-001',
       user_id: 'ui-user-001',
@@ -107,7 +116,7 @@ async function onRunBenchmark() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value
       }
-    });
+    }, requestTimeoutMs.value);
   } catch (e) {
     error.value = e instanceof Error ? e.message : '运行失败，请检查后端服务。';
   } finally {
@@ -119,13 +128,14 @@ async function onRunBatchBenchmark() {
   loading.value = true;
   error.value = '';
   result.value = null;
+  progressText.value = '';
 
   try {
     if (datasetCases.value.length === 0) {
       throw new Error('请先上传 JSON 数组测试集。');
     }
 
-    batchResult.value = await runBatchBenchmark({
+    const startResp = await runBatchBenchmarkAsync({
       config: config.value,
       user_id: 'ui-batch-user',
       isolate_sessions: isolateSessions.value,
@@ -137,7 +147,20 @@ async function onRunBatchBenchmark() {
         keyword_rerank: keywordRerank.value
       },
       cases: datasetCases.value
-    });
+    }, requestTimeoutMs.value);
+
+    while (true) {
+      const status = await getAsyncRunStatus(startResp.run_id);
+      progressText.value = `Batch Progress: ${status.completed}/${status.total} (${status.status})`;
+      if (status.status === 'completed' && status.result) {
+        batchResult.value = status.result;
+        break;
+      }
+      if (status.status === 'failed' || status.status === 'not_found') {
+        throw new Error(status.message || '批量任务失败');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : '批量运行失败，请检查后端服务。';
   } finally {
@@ -149,13 +172,14 @@ async function onRunBuiltinDataset() {
   loading.value = true;
   error.value = '';
   result.value = null;
+  progressText.value = '';
 
   try {
     if (!selectedDatasetName.value) {
       throw new Error('请先选择内置数据集。');
     }
 
-    batchResult.value = await runDatasetBenchmark({
+    const startResp = await runDatasetBenchmarkAsync({
       dataset_name: selectedDatasetName.value,
       config: config.value,
       user_id: 'ui-dataset-user',
@@ -169,7 +193,20 @@ async function onRunBuiltinDataset() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value
       }
-    });
+    }, requestTimeoutMs.value);
+
+    while (true) {
+      const status = await getAsyncRunStatus(startResp.run_id);
+      progressText.value = `Dataset Progress: ${status.completed}/${status.total} (${status.status})`;
+      if (status.status === 'completed' && status.result) {
+        batchResult.value = status.result;
+        break;
+      }
+      if (status.status === 'failed' || status.status === 'not_found') {
+        throw new Error(status.message || '内置数据集任务失败');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : '内置数据集运行失败。';
   } finally {
@@ -304,24 +341,33 @@ function downloadCsvReport() {
               <input v-model="isolateSessions" type="checkbox" />
               <span>每个测试独立会话（推荐）</span>
             </label>
+            <label class="field mt-2">
+              <span>请求超时 (ms)</span>
+              <input v-model.number="requestTimeoutMs" type="number" min="5000" step="1000" class="select" />
+            </label>
           </div>
         </div>
 
-        <div class="mt-5 flex items-center gap-3">
-          <button class="run-btn" :disabled="loading" @click="onRunBenchmark">
-            {{ loading ? 'Running...' : 'Run Benchmark' }}
-          </button>
-          <button class="run-btn" :disabled="loading" @click="onRunBatchBenchmark">
-            {{ loading ? 'Running...' : 'Run Batch' }}
-          </button>
-          <button class="run-btn" :disabled="loading" @click="onRunBuiltinDataset">
-            {{ loading ? 'Running...' : 'Run Built-in Dataset' }}
-          </button>
-          <span class="text-sm text-slate-300">Execution</span>
+        <div class="mt-5">
+          <p class="mb-2 text-sm font-semibold text-slate-300">Execution</p>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button class="run-btn w-full" :disabled="loading" @click="onRunBenchmark">
+              {{ loading ? 'Running...' : 'Run Benchmark' }}
+            </button>
+            <button class="run-btn w-full" :disabled="loading" @click="onRunBatchBenchmark">
+              {{ loading ? 'Running...' : 'Run Batch' }}
+            </button>
+            <button class="run-btn w-full" :disabled="loading" @click="onRunBuiltinDataset">
+              {{ loading ? 'Running...' : 'Run Built-in Dataset' }}
+            </button>
+          </div>
         </div>
 
         <p v-if="error" class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-200">
           {{ error }}
+        </p>
+        <p v-if="loading && progressText" class="mt-3 rounded-lg border border-arena-cyan/40 bg-arena-cyan/10 p-2 text-sm text-arena-mint">
+          {{ progressText }}
         </p>
       </section>
 

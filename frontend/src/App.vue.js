@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import MetricBars from './components/MetricBars.vue';
-import { listDatasets, runBatchBenchmark, runBenchmark, runDatasetBenchmark } from './api/client';
+import { getAsyncRunStatus, listDatasets, runBatchBenchmarkAsync, runBenchmarkWithTimeout, runDatasetBenchmarkAsync } from './api/client';
 const config = ref({
     processor: 'RawLogger',
     engine: 'VectorEngine',
@@ -27,6 +27,8 @@ const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
+const requestTimeoutMs = ref(120000);
+const progressText = ref('');
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'];
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'];
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'];
@@ -76,12 +78,13 @@ async function onRunBenchmark() {
     loading.value = true;
     error.value = '';
     batchResult.value = null;
+    progressText.value = '';
     try {
         const expectedFacts = expectedFactsRaw.value
             .split('\n')
             .map((v) => v.trim())
             .filter(Boolean);
-        result.value = await runBenchmark({
+        result.value = await runBenchmarkWithTimeout({
             config: config.value,
             session_id: 'ui-session-001',
             user_id: 'ui-user-001',
@@ -94,7 +97,7 @@ async function onRunBenchmark() {
                 similarity_strategy: similarityStrategy.value,
                 keyword_rerank: keywordRerank.value
             }
-        });
+        }, requestTimeoutMs.value);
     }
     catch (e) {
         error.value = e instanceof Error ? e.message : '运行失败，请检查后端服务。';
@@ -107,11 +110,12 @@ async function onRunBatchBenchmark() {
     loading.value = true;
     error.value = '';
     result.value = null;
+    progressText.value = '';
     try {
         if (datasetCases.value.length === 0) {
             throw new Error('请先上传 JSON 数组测试集。');
         }
-        batchResult.value = await runBatchBenchmark({
+        const startResp = await runBatchBenchmarkAsync({
             config: config.value,
             user_id: 'ui-batch-user',
             isolate_sessions: isolateSessions.value,
@@ -123,7 +127,19 @@ async function onRunBatchBenchmark() {
                 keyword_rerank: keywordRerank.value
             },
             cases: datasetCases.value
-        });
+        }, requestTimeoutMs.value);
+        while (true) {
+            const status = await getAsyncRunStatus(startResp.run_id);
+            progressText.value = `Batch Progress: ${status.completed}/${status.total} (${status.status})`;
+            if (status.status === 'completed' && status.result) {
+                batchResult.value = status.result;
+                break;
+            }
+            if (status.status === 'failed' || status.status === 'not_found') {
+                throw new Error(status.message || '批量任务失败');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 800));
+        }
     }
     catch (e) {
         error.value = e instanceof Error ? e.message : '批量运行失败，请检查后端服务。';
@@ -136,11 +152,12 @@ async function onRunBuiltinDataset() {
     loading.value = true;
     error.value = '';
     result.value = null;
+    progressText.value = '';
     try {
         if (!selectedDatasetName.value) {
             throw new Error('请先选择内置数据集。');
         }
-        batchResult.value = await runDatasetBenchmark({
+        const startResp = await runDatasetBenchmarkAsync({
             dataset_name: selectedDatasetName.value,
             config: config.value,
             user_id: 'ui-dataset-user',
@@ -154,7 +171,19 @@ async function onRunBuiltinDataset() {
                 similarity_strategy: similarityStrategy.value,
                 keyword_rerank: keywordRerank.value
             }
-        });
+        }, requestTimeoutMs.value);
+        while (true) {
+            const status = await getAsyncRunStatus(startResp.run_id);
+            progressText.value = `Dataset Progress: ${status.completed}/${status.total} (${status.status})`;
+            if (status.status === 'completed' && status.result) {
+                batchResult.value = status.result;
+                break;
+            }
+            if (status.status === 'failed' || status.status === 'not_found') {
+                throw new Error(status.message || '内置数据集任务失败');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 800));
+        }
     }
     catch (e) {
         error.value = e instanceof Error ? e.message : '内置数据集运行失败。';
@@ -440,35 +469,55 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
 });
 (__VLS_ctx.isolateSessions);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field mt-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "5000",
+    step: "1000",
+    ...{ class: "select" },
+});
+(__VLS_ctx.requestTimeoutMs);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-    ...{ class: "mt-5 flex items-center gap-3" },
+    ...{ class: "mt-5" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mb-2 text-sm font-semibold text-slate-300" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "grid grid-cols-1 gap-2 sm:grid-cols-3" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
     ...{ onClick: (__VLS_ctx.onRunBenchmark) },
-    ...{ class: "run-btn" },
+    ...{ class: "run-btn w-full" },
     disabled: (__VLS_ctx.loading),
 });
 (__VLS_ctx.loading ? 'Running...' : 'Run Benchmark');
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
     ...{ onClick: (__VLS_ctx.onRunBatchBenchmark) },
-    ...{ class: "run-btn" },
+    ...{ class: "run-btn w-full" },
     disabled: (__VLS_ctx.loading),
 });
 (__VLS_ctx.loading ? 'Running...' : 'Run Batch');
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
     ...{ onClick: (__VLS_ctx.onRunBuiltinDataset) },
-    ...{ class: "run-btn" },
+    ...{ class: "run-btn w-full" },
     disabled: (__VLS_ctx.loading),
 });
 (__VLS_ctx.loading ? 'Running...' : 'Run Built-in Dataset');
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-    ...{ class: "text-sm text-slate-300" },
-});
 if (__VLS_ctx.error) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
         ...{ class: "mt-3 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-200" },
     });
     (__VLS_ctx.error);
+}
+if (__VLS_ctx.loading && __VLS_ctx.progressText) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "mt-3 rounded-lg border border-arena-cyan/40 bg-arena-cyan/10 p-2 text-sm text-arena-mint" },
+    });
+    (__VLS_ctx.progressText);
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
     ...{ class: "panel lg:col-span-1" },
@@ -645,15 +694,24 @@ else {
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-5']} */ ;
-/** @type {__VLS_StyleScopedClasses['flex']} */ ;
-/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
-/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
-/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
-/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
-/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid-cols-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['sm:grid-cols-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['run-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-full']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
@@ -662,6 +720,14 @@ else {
 /** @type {__VLS_StyleScopedClasses['p-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-red-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-arena-cyan/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-arena-cyan/10']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['lg:col-span-1']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
@@ -754,6 +820,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             datasetSampleSize: datasetSampleSize,
             datasetStartIndex: datasetStartIndex,
             isolateSessions: isolateSessions,
+            requestTimeoutMs: requestTimeoutMs,
+            progressText: progressText,
             processors: processors,
             engines: engines,
             assemblers: assemblers,

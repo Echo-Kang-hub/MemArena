@@ -17,7 +17,8 @@ env/
 .conda/
 
 # Backend runtime data
-backend/data/
+data/
+backend/backend/
 backend/.cache/
 backend/logs/
 

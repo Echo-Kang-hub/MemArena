@@ -211,3 +211,17 @@ class DatasetRunRequest(BaseModel):
     sample_size: int = Field(default=10, ge=1)
     start_index: int = Field(default=0, ge=0)
     isolate_sessions: bool = True
+
+
+class AsyncRunStartResponse(BaseModel):
+    run_id: str
+    status: str
+
+
+class AsyncRunStatusResponse(BaseModel):
+    run_id: str
+    status: str
+    completed: int
+    total: int
+    message: str = ""
+    result: BatchBenchmarkRunResponse | None = None
