@@ -69,7 +69,9 @@ export async function runDatasetBenchmarkAsync(
   return data;
 }
 
-export async function getAsyncRunStatus(runId: string): Promise<AsyncRunStatusResponse> {
-  const { data } = await client.get<AsyncRunStatusResponse>(`/api/benchmark/runs/${runId}`);
+export async function getAsyncRunStatus(runId: string, timeoutMs?: number): Promise<AsyncRunStatusResponse> {
+  const { data } = await client.get<AsyncRunStatusResponse>(`/api/benchmark/runs/${runId}`, {
+    timeout: timeoutMs ?? 30000
+  });
   return data;
 }

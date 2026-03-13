@@ -1,0 +1,10 @@
+{
+  "name": "memarena-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm --prefix frontend run preview",
+    "backend:dev": "uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --app-dir backend"
+  }
+}

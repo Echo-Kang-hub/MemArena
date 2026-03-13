@@ -89,7 +89,17 @@ class VectorEngine(MemoryEngine):
                 }
             )
 
-        collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+        try:
+            collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+        except Exception as exc:
+            err = str(exc)
+            if "dimension" in err.lower():
+                raise ValueError(
+                    "Chroma collection embedding dimension mismatch. "
+                    f"collection={self.collection_name}. "
+                    "Please switch retrieval.collection_name to a new value, or clear the old collection data."
+                ) from exc
+            raise
         return EngineSaveResult(
             engine=self.engine_type,
             saved_count=len(request.chunks),

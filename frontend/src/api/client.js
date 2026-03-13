@@ -41,8 +41,10 @@ export async function runDatasetBenchmarkAsync(payload, timeoutMs) {
     });
     return data;
 }
-export async function getAsyncRunStatus(runId) {
-    const { data } = await client.get(`/api/benchmark/runs/${runId}`);
+export async function getAsyncRunStatus(runId, timeoutMs) {
+    const { data } = await client.get(`/api/benchmark/runs/${runId}`, {
+        timeout: timeoutMs ?? 30000
+    });
     return data;
 }
 //# sourceMappingURL=client.js.map

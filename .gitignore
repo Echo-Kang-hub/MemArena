@@ -18,6 +18,7 @@ env/
 
 # Backend runtime data
 data/
+backend/data/
 backend/backend/
 backend/.cache/
 backend/logs/

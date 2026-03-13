@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
@@ -41,6 +43,13 @@ app = FastAPI(title="MemArena Backend", version="0.1.0")
 
 # 轻量内存任务状态表：用于前端轮询批量任务进度
 RUN_STATES: dict[str, dict] = {}
+
+
+def _auto_collection_name(base_name: str, embedding_provider: str, embedding_model: str) -> str:
+    compact_model = re.sub(r"[^a-z0-9]+", "_", embedding_model.lower()).strip("_")
+    compact_model = compact_model[:48] or "default"
+    compact_provider = re.sub(r"[^a-z0-9]+", "_", embedding_provider.lower()).strip("_") or "provider"
+    return f"{base_name}_{compact_provider}_{compact_model}"
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,11 +102,31 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         judge_llm_client = ProviderFactory.build_judge_llm()
         embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider)
 
+        effective_collection_name = payload.retrieval.collection_name
+        if effective_collection_name == settings.chroma_collection_name:
+            effective_collection_name = _auto_collection_name(
+                settings.chroma_collection_name,
+                str(payload.config.embedding_provider),
+                embedding_client.model,
+            )
+            write_audit_event(
+                "collection_auto_resolved",
+                {
+                    "run_id": cur_run_id,
+                    "original_collection": payload.retrieval.collection_name,
+                    "resolved_collection": effective_collection_name,
+                    "embedding_provider": str(payload.config.embedding_provider),
+                    "embedding_model": embedding_client.model,
+                },
+            )
+
+        retrieval_cfg = payload.retrieval.model_copy(update={"collection_name": effective_collection_name})
+
         processor = build_processor(payload.config.processor)
         engine = build_engine(
             payload.config.engine,
             embedding_client=embedding_client,
-            collection_name=payload.retrieval.collection_name,
+            collection_name=retrieval_cfg.collection_name,
         )
         assembler = build_assembler(payload.config.assembler)
         reflector = build_reflector(payload.config.reflector)
@@ -108,7 +137,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             user_id=payload.user_id,
             message=payload.input_text,
             metadata={
-                "llm_preview": llm_client.generate("provider handshake", purpose="chat_handshake"),
+                "llm_preview": f"{llm_client.provider}:{llm_client.model}",
                 "embedding_preview": embedding_client.embed(payload.input_text),
             },
         )
@@ -120,12 +149,12 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             EngineSearchRequest(
                 session_id=payload.session_id,
                 query=payload.input_text,
-                top_k=payload.retrieval.top_k,
+                top_k=retrieval_cfg.top_k,
                 filters={
-                    "min_relevance": payload.retrieval.min_relevance,
-                    "collection_name": payload.retrieval.collection_name,
-                    "similarity_strategy": payload.retrieval.similarity_strategy,
-                    "keyword_rerank": payload.retrieval.keyword_rerank,
+                    "min_relevance": retrieval_cfg.min_relevance,
+                    "collection_name": retrieval_cfg.collection_name,
+                    "similarity_strategy": retrieval_cfg.similarity_strategy,
+                    "keyword_rerank": retrieval_cfg.keyword_rerank,
                 },
             )
         )
@@ -180,6 +209,16 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             },
         )
         return response
+    except ValueError as exc:
+        write_audit_event(
+            "run_single_failed",
+            {
+                "run_id": cur_run_id,
+                "session_id": payload.session_id,
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         write_audit_event(
             "run_single_failed",
@@ -275,7 +314,11 @@ async def _execute_batch(run_id: str, payload: BatchBenchmarkRunRequest, track_p
             expected_facts=case.expected_facts,
             retrieval=payload.retrieval,
         )
-        result = await _execute_single(payload=single_req, run_id=run_id)
+        if track_progress:
+            # 后台批量任务放到线程执行，避免阻塞事件循环导致状态轮询超时。
+            result = await asyncio.to_thread(lambda: asyncio.run(_execute_single(payload=single_req, run_id=run_id)))
+        else:
+            result = await _execute_single(payload=single_req, run_id=run_id)
         case_results.append(result)
 
         if track_progress:

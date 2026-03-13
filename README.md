@@ -139,6 +139,10 @@ docker compose up --build
 - `data/` 已在 `.gitignore` 中忽略，不会进入版本库。
 - 当模型调用失败时，可优先检查 `request_audit.jsonl` 中同一 `event` 的失败记录，定位 provider、模型、耗时与错误信息。
 
+## Chroma 维度冲突说明
+- 若使用默认集合名 `memarena_memory`，后端会根据 embedding provider + model 自动解析为独立集合名（例如 `memarena_memory_ollama_qwen3_embedding_0_6b`），以避免历史维度冲突。
+- 若你手动指定了 `collection_name`，系统会按你指定的名称执行；若该集合已有不同维度数据，接口会返回 400 并提示你更换集合或清理旧数据。
+
 ## 可选 Memory 方案说明
 - 全量方案目录与解释见 `docs/memory_modules_catalog.md`。
 - 后续新增 Processor/Engine/Assembler/Reflector/Bench 时，请同步更新该文档。
@@ -167,6 +171,42 @@ docker compose up --build
 - `GET /api/audit/runs/{run_id}`：按 run_id 查询请求审计日志（支持 `limit` 参数）。
 - `GET /api/datasets`：查看内置数据集及条目数。
 - `GET /api/options`：可选模块与检索策略枚举。
+
+## 指标定义与解读
+- `Precision`：检索结果中“有用信息”的占比，越高说明噪声越少。
+- `Faithfulness`：期望事实被覆盖的程度，越高说明召回更完整。
+- `InfoLoss`：关键信息缺失程度，越低越好（可视为 `1 - Retention`）。
+
+前端同时显示一些派生信号，帮助避免“只看三个均值”的误判：
+- `F1 (P&R Balance)`：平衡 Precision 与 Faithfulness。
+- `Retention (1-InfoLoss)`：保留信息比例。
+- `Hallucination Risk (1-P)`：噪声/幻觉风险近似值。
+- `Pass Rate`（批量）：达到阈值样本占比（默认 `P>=0.8, F>=0.8, L<=0.2`）。
+- `Std(P/F/L)`（批量）：波动性，越低越稳定。
+- `Worst-case F1`（批量）：最差样本表现，反映下限可靠性。
+
+### 代表性边界说明
+- 这组指标对“记忆检索与事实覆盖”很有用，但不是通用 AI 能力总分。
+- 指标依赖 `expected_facts` 的质量；标注不全会导致分数虚高或虚低。
+- `LLM-as-a-Judge` 可能存在评委偏差，建议配合抽样人工复核。
+- 建议把 `均值 + 波动 + 最差样本 + 原始评审理由` 一起看，而不是只看单一高分。
+
+## 如何构造更有挑战性的测试
+- 干扰信息：在输入中混入相似实体（如上海/上饶、周二/下周二）测试抗混淆能力。
+- 时序冲突：同会话多轮改期/撤销，检验是否能覆盖“最新事实”。
+- 长上下文噪声：在 20~50 条历史中插入少量关键事实，观察召回稳定性。
+- 否定与条件句：例如“如果下雨就取消，不下雨正常进行”，检查条件约束处理。
+- 多语言与口语：中英混写、缩写、错别字，测试鲁棒性。
+- 对抗样本：加入错误先验或诱导描述，检查是否被污染。
+
+建议至少维护三类数据集：
+- `smoke`：快速冒烟，保证链路通。
+- `regression`：固定回归，防止改动后退化。
+- `hard`：高难样本集，用于区分模型/策略差异。
+
+## 运行计时显示
+- 前端在执行中会实时显示 `Elapsed`。
+- 执行结束后会显示 `Last Run Duration`，用于对比不同配置耗时。
 
 ## 内置数据集放置位置
 - 将下载的数据集文件放到 `backend/datasets/`，格式为 JSON 数组。

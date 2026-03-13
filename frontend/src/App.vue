@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import MetricBars from './components/MetricBars.vue';
 import {
   getAsyncRunStatus,
@@ -44,12 +44,127 @@ const datasetStartIndex = ref(0);
 const isolateSessions = ref(true);
 const requestTimeoutMs = ref(120000);
 const progressText = ref('');
+const elapsedMs = ref(0);
+const lastRunDurationMs = ref<number | null>(null);
+
+let timerHandle: ReturnType<typeof setInterval> | null = null;
+let runStartTs = 0;
 
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'] as const;
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const;
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
 const providers = ['api', 'ollama', 'local'] as const;
+
+function startRunTimer() {
+  stopRunTimer();
+  runStartTs = Date.now();
+  elapsedMs.value = 0;
+  timerHandle = setInterval(() => {
+    elapsedMs.value = Date.now() - runStartTs;
+  }, 200);
+}
+
+function stopRunTimer() {
+  if (timerHandle) {
+    clearInterval(timerHandle);
+    timerHandle = null;
+  }
+  if (runStartTs > 0) {
+    elapsedMs.value = Date.now() - runStartTs;
+  }
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds
+      .toString()
+      .padStart(2, '0')}`;
+  }
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+const runningDurationLabel = computed(() => formatDuration(elapsedMs.value));
+const finishedDurationLabel = computed(() => {
+  if (lastRunDurationMs.value == null) {
+    return '';
+  }
+  return formatDuration(lastRunDurationMs.value);
+});
+
+const singleDerivedRows = computed(() => {
+  if (!result.value) {
+    return [] as Array<{ label: string; value: string; hint: string }>;
+  }
+
+  const precision = result.value.eval_result.metrics.precision;
+  const coverage = result.value.eval_result.metrics.faithfulness;
+  const infoLoss = result.value.eval_result.metrics.info_loss;
+  const f1 = precision + coverage > 0 ? (2 * precision * coverage) / (precision + coverage) : 0;
+  const retention = 1 - infoLoss;
+  const hallucinationRisk = 1 - precision;
+  const hitCount = result.value.search_result.hits.length;
+  const avgRelevance =
+    hitCount > 0
+      ? result.value.search_result.hits.reduce((sum, hit) => sum + hit.relevance, 0) / hitCount
+      : 0;
+
+  return [
+    { label: 'F1 (P&R Balance)', value: `${(f1 * 100).toFixed(1)}%`, hint: '平衡精确率与覆盖率，避免只高其一。' },
+    { label: 'Retention (1-InfoLoss)', value: `${(retention * 100).toFixed(1)}%`, hint: '保真保留程度，越高越好。' },
+    { label: 'Hallucination Risk (1-P)', value: `${(hallucinationRisk * 100).toFixed(1)}%`, hint: '检索噪声或幻觉风险，越低越好。' },
+    { label: 'Retrieved Hits', value: `${hitCount}`, hint: '本次检索命中条数。' },
+    { label: 'Avg Hit Relevance', value: avgRelevance.toFixed(3), hint: '命中文档平均相关度。' }
+  ];
+});
+
+const batchDerivedRows = computed(() => {
+  if (!batchResult.value || batchResult.value.case_results.length === 0) {
+    return [] as Array<{ label: string; value: string; hint: string }>;
+  }
+
+  const cases = batchResult.value.case_results;
+  const f1Values = cases.map((r) => {
+    const p = r.eval_result.metrics.precision;
+    const c = r.eval_result.metrics.faithfulness;
+    return p + c > 0 ? (2 * p * c) / (p + c) : 0;
+  });
+  const meanF1 = f1Values.reduce((sum, v) => sum + v, 0) / f1Values.length;
+  const sortedF1 = [...f1Values].sort((a, b) => a - b);
+  const medianF1 = sortedF1[Math.floor(sortedF1.length / 2)];
+  const std = (values: number[]) => {
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+    return Math.sqrt(variance);
+  };
+  const precisionStd = std(cases.map((r) => r.eval_result.metrics.precision));
+  const faithfulnessStd = std(cases.map((r) => r.eval_result.metrics.faithfulness));
+  const infoLossStd = std(cases.map((r) => r.eval_result.metrics.info_loss));
+  const passCount = cases.filter(
+    (r) =>
+      r.eval_result.metrics.precision >= 0.8 &&
+      r.eval_result.metrics.faithfulness >= 0.8 &&
+      r.eval_result.metrics.info_loss <= 0.2
+  ).length;
+  const passRate = passCount / cases.length;
+  const worstF1 = sortedF1[0];
+
+  return [
+    { label: 'Pass Rate (P>=0.8/F>=0.8/L<=0.2)', value: `${(passRate * 100).toFixed(1)}%`, hint: '达标样本比例，避免只看均值。' },
+    { label: 'Mean F1', value: `${(meanF1 * 100).toFixed(1)}%`, hint: '批量整体平衡表现。' },
+    { label: 'Median F1', value: `${(medianF1 * 100).toFixed(1)}%`, hint: '中位水平，降低极端值影响。' },
+    { label: 'Worst-case F1', value: `${(worstF1 * 100).toFixed(1)}%`, hint: '最差样本性能，反映可靠性下限。' },
+    { label: 'Std(P/F/L)', value: `${precisionStd.toFixed(3)} / ${faithfulnessStd.toFixed(3)} / ${infoLossStd.toFixed(3)}`, hint: '波动越小说明系统越稳定。' }
+  ];
+});
+
+onBeforeUnmount(() => {
+  stopRunTimer();
+});
 
 async function loadBuiltinDatasets() {
   try {
@@ -96,6 +211,8 @@ async function onRunBenchmark() {
   error.value = '';
   batchResult.value = null;
   progressText.value = '';
+  lastRunDurationMs.value = null;
+  startRunTimer();
 
   try {
     const expectedFacts = expectedFactsRaw.value
@@ -120,6 +237,8 @@ async function onRunBenchmark() {
   } catch (e) {
     error.value = e instanceof Error ? e.message : '运行失败，请检查后端服务。';
   } finally {
+    stopRunTimer();
+    lastRunDurationMs.value = elapsedMs.value;
     loading.value = false;
   }
 }
@@ -129,11 +248,15 @@ async function onRunBatchBenchmark() {
   error.value = '';
   result.value = null;
   progressText.value = '';
+  lastRunDurationMs.value = null;
+  startRunTimer();
 
   try {
     if (datasetCases.value.length === 0) {
       throw new Error('请先上传 JSON 数组测试集。');
     }
+
+    progressText.value = `Batch Progress: 0/${datasetCases.value.length} (submitting)`;
 
     const startResp = await runBatchBenchmarkAsync({
       config: config.value,
@@ -149,8 +272,10 @@ async function onRunBatchBenchmark() {
       cases: datasetCases.value
     }, requestTimeoutMs.value);
 
+    progressText.value = `Batch Progress: 0/${datasetCases.value.length} (queued)`;
+
     while (true) {
-      const status = await getAsyncRunStatus(startResp.run_id);
+      const status = await getAsyncRunStatus(startResp.run_id, requestTimeoutMs.value);
       progressText.value = `Batch Progress: ${status.completed}/${status.total} (${status.status})`;
       if (status.status === 'completed' && status.result) {
         batchResult.value = status.result;
@@ -164,6 +289,8 @@ async function onRunBatchBenchmark() {
   } catch (e) {
     error.value = e instanceof Error ? e.message : '批量运行失败，请检查后端服务。';
   } finally {
+    stopRunTimer();
+    lastRunDurationMs.value = elapsedMs.value;
     loading.value = false;
   }
 }
@@ -173,11 +300,18 @@ async function onRunBuiltinDataset() {
   error.value = '';
   result.value = null;
   progressText.value = '';
+  lastRunDurationMs.value = null;
+  startRunTimer();
 
   try {
     if (!selectedDatasetName.value) {
       throw new Error('请先选择内置数据集。');
     }
+
+    const selectedMeta = builtinDatasets.value.find((d) => d.name === selectedDatasetName.value);
+    const available = Math.max(0, (selectedMeta?.count ?? 0) - datasetStartIndex.value);
+    const plannedTotal = Math.max(0, Math.min(datasetSampleSize.value, available));
+    progressText.value = `Dataset Progress: 0/${plannedTotal} (submitting)`;
 
     const startResp = await runDatasetBenchmarkAsync({
       dataset_name: selectedDatasetName.value,
@@ -195,8 +329,10 @@ async function onRunBuiltinDataset() {
       }
     }, requestTimeoutMs.value);
 
+    progressText.value = `Dataset Progress: 0/${plannedTotal} (queued)`;
+
     while (true) {
-      const status = await getAsyncRunStatus(startResp.run_id);
+      const status = await getAsyncRunStatus(startResp.run_id, requestTimeoutMs.value);
       progressText.value = `Dataset Progress: ${status.completed}/${status.total} (${status.status})`;
       if (status.status === 'completed' && status.result) {
         batchResult.value = status.result;
@@ -210,6 +346,8 @@ async function onRunBuiltinDataset() {
   } catch (e) {
     error.value = e instanceof Error ? e.message : '内置数据集运行失败。';
   } finally {
+    stopRunTimer();
+    lastRunDurationMs.value = elapsedMs.value;
     loading.value = false;
   }
 }
@@ -369,6 +507,12 @@ function downloadCsvReport() {
         <p v-if="loading && progressText" class="mt-3 rounded-lg border border-arena-cyan/40 bg-arena-cyan/10 p-2 text-sm text-arena-mint">
           {{ progressText }}
         </p>
+        <p v-if="loading" class="mt-2 rounded-lg border border-arena-amber/40 bg-arena-amber/10 p-2 text-sm text-arena-amber">
+          Elapsed: {{ runningDurationLabel }}
+        </p>
+        <p v-else-if="lastRunDurationMs !== null" class="mt-2 rounded-lg border border-slate-500/40 bg-slate-800/60 p-2 text-sm text-slate-200">
+          Last Run Duration: {{ finishedDurationLabel }}
+        </p>
       </section>
 
       <section class="panel lg:col-span-1">
@@ -376,6 +520,19 @@ function downloadCsvReport() {
 
         <div v-if="result" class="space-y-4">
           <MetricBars :metrics="result.eval_result.metrics" />
+
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Additional Signals</h3>
+            <div class="space-y-2">
+              <div v-for="item in singleDerivedRows" :key="item.label" class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-semibold text-slate-200">{{ item.label }}</span>
+                  <span class="text-xs text-arena-mint">{{ item.value }}</span>
+                </div>
+                <p class="mt-1 text-[11px] text-slate-400">{{ item.hint }}</p>
+              </div>
+            </div>
+          </div>
 
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Prompt Preview</h3>
@@ -395,6 +552,18 @@ function downloadCsvReport() {
 
         <div v-else-if="batchResult" class="space-y-4">
           <MetricBars :metrics="batchResult.avg_metrics" />
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Stability & Robustness</h3>
+            <div class="space-y-2">
+              <div v-for="item in batchDerivedRows" :key="item.label" class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-semibold text-slate-200">{{ item.label }}</span>
+                  <span class="text-xs text-arena-mint">{{ item.value }}</span>
+                </div>
+                <p class="mt-1 text-[11px] text-slate-400">{{ item.hint }}</p>
+              </div>
+            </div>
+          </div>
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Batch Summary</h3>
             <p class="text-xs text-slate-200">Run ID: {{ batchResult.run_id }}</p>
