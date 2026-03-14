@@ -146,6 +146,36 @@ docker compose up --build
 - 全量方案目录与解释见 `docs/memory_modules_catalog.md`。
 - 后续新增 Processor/Engine/Assembler/Reflector/Bench 时，请同步更新该文档。
 
+### 短期记忆（STM）与长期记忆（LTM）分层
+- LTM：继续由 Engine（Vector/Graph/Relational）承担持久化与检索。
+- STM：新增运行时策略层，支持以下模式：
+  - `None`
+  - `SlidingWindow`
+  - `TokenBuffer`
+  - `RollingSummary`
+  - `WorkingMemoryBlackboard`
+- API 请求中通过 `retrieval` 传参：
+  - `short_term_mode`
+  - `stm_window_turns`
+  - `stm_token_budget`
+  - `stm_summary_keep_recent_turns`
+- 后端会将 STM 命中与 LTM 命中合并排序，再交给 Assembler。
+
+### Assembler 对比汇总脚本
+- 单次跑各 Assembler 基准：
+  - `python backend/scripts/benchmark_assembler_comparison.py`
+- 汇总多份 CSV（`backend/data/reports/assembler_compare_*.csv`）并输出 4 个核心方案排名：
+  - `python backend/scripts/summarize_assembler_reports.py`
+- 支持可选参数：
+  - `--report-dir` 自定义报告目录
+  - `--csv-glob` 自定义 CSV 匹配模式
+  - `--assemblers` 指定方案列表（逗号分隔）
+  - `--weights` 自定义评分权重
+  - 示例：`python backend/scripts/summarize_assembler_reports.py --assemblers SystemInjector,ReasoningChain --weights precision=0.4,faithfulness=0.3,info_loss=0.2,context_distraction=0.05,seed_touch=0.05`
+- 输出文件：
+  - `backend/data/reports/assembler_summary_*.json`
+  - `backend/data/reports/assembler_summary_*.md`
+
 ## 批量评测数据集格式
 前端上传 JSON 文件时，建议使用数组格式：
 

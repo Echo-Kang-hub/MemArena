@@ -31,6 +31,12 @@ const similarityStrategy = ref('inverse_distance');
 const keywordRerank = ref(false);
 const maxContextTokens = ref(1200);
 const reasoningHops = ref(1);
+const shortTermMode = ref('None');
+const stmWindowTurns = ref(5);
+const stmTokenBudget = ref(2000);
+const stmSummaryKeepRecentTurns = ref(4);
+const reflectorAutoWriteback = ref(false);
+const reflectorWritebackMinConfidence = ref(0.75);
 const datasetCases = ref([]);
 const builtinDatasets = ref([]);
 const selectedDatasetName = ref('');
@@ -72,6 +78,13 @@ const providers = ['api', 'ollama', 'local'];
 const summarizerMethods = ['llm', 'kmeans'];
 const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'];
 const computeDevices = ['cpu', 'cuda'];
+const shortTermModes = [
+    'None',
+    'SlidingWindow',
+    'TokenBuffer',
+    'RollingSummary',
+    'WorkingMemoryBlackboard'
+];
 const md = new MarkdownIt({
     html: false,
     linkify: true,
@@ -87,6 +100,9 @@ const plannedBatchCaseCount = computed(() => {
 const batchInputModeLabel = computed(() => usingUploadedBatchCases.value ? 'JSON 上传测试集模式' : '单条输入自动生成模式');
 const isSummarizerProcessor = computed(() => config.value.processor === 'Summarizer');
 const isEntityExtractorProcessor = computed(() => config.value.processor === 'EntityExtractor');
+const showStmWindow = computed(() => shortTermMode.value === 'SlidingWindow');
+const showStmTokenBudget = computed(() => shortTermMode.value === 'TokenBuffer');
+const showStmRolling = computed(() => shortTermMode.value === 'RollingSummary');
 const isEntityTripleMode = computed(() => {
     const method = config.value.entity_extractor_method;
     return method === 'llm_triple' || method === 'spacy_llm_triple';
@@ -770,7 +786,13 @@ async function onRunBenchmark() {
                 similarity_strategy: similarityStrategy.value,
                 keyword_rerank: keywordRerank.value,
                 max_context_tokens: maxContextTokens.value,
-                reasoning_hops: reasoningHops.value
+                reasoning_hops: reasoningHops.value,
+                short_term_mode: shortTermMode.value,
+                stm_window_turns: stmWindowTurns.value,
+                stm_token_budget: stmTokenBudget.value,
+                stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+                reflector_auto_writeback: reflectorAutoWriteback.value,
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
             }
         }, requestTimeoutMs.value);
         if (result.value?.run_id) {
@@ -825,7 +847,13 @@ async function onRunBatchBenchmark() {
                 similarity_strategy: similarityStrategy.value,
                 keyword_rerank: keywordRerank.value,
                 max_context_tokens: maxContextTokens.value,
-                reasoning_hops: reasoningHops.value
+                reasoning_hops: reasoningHops.value,
+                short_term_mode: shortTermMode.value,
+                stm_window_turns: stmWindowTurns.value,
+                stm_token_budget: stmTokenBudget.value,
+                stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+                reflector_auto_writeback: reflectorAutoWriteback.value,
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
             },
             cases: casesToRun
         }, requestTimeoutMs.value);
@@ -887,7 +915,13 @@ async function onRunBuiltinDataset() {
                 similarity_strategy: similarityStrategy.value,
                 keyword_rerank: keywordRerank.value,
                 max_context_tokens: maxContextTokens.value,
-                reasoning_hops: reasoningHops.value
+                reasoning_hops: reasoningHops.value,
+                short_term_mode: shortTermMode.value,
+                stm_window_turns: stmWindowTurns.value,
+                stm_token_budget: stmTokenBudget.value,
+                stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+                reflector_auto_writeback: reflectorAutoWriteback.value,
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
             }
         }, requestTimeoutMs.value);
         progressText.value = `Dataset Progress: 0/${plannedTotal} (queued)`;
@@ -1238,6 +1272,98 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
     ...{ class: "select" },
 });
 (__VLS_ctx.reasoningHops);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    value: (__VLS_ctx.shortTermMode),
+    ...{ class: "select" },
+});
+for (const [x] of __VLS_getVForSourceType((__VLS_ctx.shortTermModes))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        key: (x),
+        value: (x),
+    });
+    (x);
+}
+if (__VLS_ctx.showStmWindow) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field mt-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "1",
+        max: "30",
+        ...{ class: "select" },
+    });
+    (__VLS_ctx.stmWindowTurns);
+}
+if (__VLS_ctx.showStmTokenBudget) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field mt-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "128",
+        max: "16000",
+        ...{ class: "select" },
+    });
+    (__VLS_ctx.stmTokenBudget);
+}
+if (__VLS_ctx.showStmRolling) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field mt-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "1",
+        max: "12",
+        ...{ class: "select" },
+    });
+    (__VLS_ctx.stmSummaryKeepRecentTurns);
+}
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mt-2 text-xs text-slate-400" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "flex items-center gap-2 text-sm text-slate-200" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "checkbox",
+});
+(__VLS_ctx.reflectorAutoWriteback);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field mt-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "0",
+    max: "1",
+    step: "0.05",
+    ...{ class: "select" },
+});
+(__VLS_ctx.reflectorWritebackMinConfidence);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mt-2 text-xs text-slate-400" },
+});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
     ...{ class: "panel lg:col-span-1" },
 });
@@ -1908,6 +2034,51 @@ else {
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['lg:col-span-1']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
@@ -2400,6 +2571,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             keywordRerank: keywordRerank,
             maxContextTokens: maxContextTokens,
             reasoningHops: reasoningHops,
+            shortTermMode: shortTermMode,
+            stmWindowTurns: stmWindowTurns,
+            stmTokenBudget: stmTokenBudget,
+            stmSummaryKeepRecentTurns: stmSummaryKeepRecentTurns,
+            reflectorAutoWriteback: reflectorAutoWriteback,
+            reflectorWritebackMinConfidence: reflectorWritebackMinConfidence,
             builtinDatasets: builtinDatasets,
             selectedDatasetName: selectedDatasetName,
             datasetSampleSize: datasetSampleSize,
@@ -2422,10 +2599,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             summarizerMethods: summarizerMethods,
             entityExtractorMethods: entityExtractorMethods,
             computeDevices: computeDevices,
+            shortTermModes: shortTermModes,
             plannedBatchCaseCount: plannedBatchCaseCount,
             batchInputModeLabel: batchInputModeLabel,
             isSummarizerProcessor: isSummarizerProcessor,
             isEntityExtractorProcessor: isEntityExtractorProcessor,
+            showStmWindow: showStmWindow,
+            showStmTokenBudget: showStmTokenBudget,
+            showStmRolling: showStmRolling,
             isEntityTripleMode: isEntityTripleMode,
             copyEntityDiagnostic: copyEntityDiagnostic,
             copyBatchDiagnostic: copyBatchDiagnostic,

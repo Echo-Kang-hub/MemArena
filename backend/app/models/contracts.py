@@ -39,6 +39,14 @@ class ReflectorType(str, Enum):
     abstraction_reflector = "AbstractionReflector"
 
 
+class ShortTermMemoryMode(str, Enum):
+    none = "None"
+    sliding_window = "SlidingWindow"
+    token_buffer = "TokenBuffer"
+    rolling_summary = "RollingSummary"
+    working_memory_blackboard = "WorkingMemoryBlackboard"
+
+
 class ProviderType(str, Enum):
     api = "api"
     ollama = "ollama"
@@ -199,6 +207,12 @@ class RetrievalConfig(BaseModel):
     keyword_rerank: bool = False
     max_context_tokens: int | None = Field(default=None, ge=64, le=8192)
     reasoning_hops: int = Field(default=1, ge=1, le=3)
+    short_term_mode: ShortTermMemoryMode = ShortTermMemoryMode.none
+    stm_window_turns: int = Field(default=5, ge=1, le=30)
+    stm_token_budget: int = Field(default=2000, ge=128, le=16000)
+    stm_summary_keep_recent_turns: int = Field(default=4, ge=1, le=12)
+    reflector_auto_writeback: bool = False
+    reflector_writeback_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
 class BenchmarkRunRequest(BaseModel):

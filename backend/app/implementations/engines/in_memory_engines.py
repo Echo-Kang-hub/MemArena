@@ -173,6 +173,71 @@ class _BaseInMemoryEngine(MemoryEngine):
             return self._score_attributes(query, metadata)
         return 0.0
 
+    def _collect_resolution_updates(self, candidates: list[tuple[str, str, dict]]) -> list[dict[str, Any]]:
+        updates: list[dict[str, Any]] = []
+        for _, _, metadata in candidates:
+            if not bool(metadata.get("memory_control_chunk", False)):
+                continue
+            values = metadata.get("resolution_updates", [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                confidence = float(item.get("confidence", 0.0) or 0.0)
+                if confidence < 0.5:
+                    continue
+                updates.append(item)
+        return updates
+
+    def _compute_resolution_penalty(self, metadata: dict[str, Any], updates: list[dict[str, Any]]) -> float:
+        if not updates:
+            return 1.0
+
+        attrs = metadata.get("attributes", [])
+        triples = metadata.get("triples", [])
+        penalty = 1.0
+
+        attr_items = attrs if isinstance(attrs, list) else []
+        triple_items = triples if isinstance(triples, list) else []
+
+        for update in updates:
+            kind = str(update.get("kind", "")).strip().lower()
+            confidence = float(update.get("confidence", 0.0) or 0.0)
+            weight = min(1.0, max(0.5, confidence))
+
+            if kind == "attribute":
+                ue = str(update.get("entity", "")).strip().lower()
+                ua = str(update.get("attribute", "")).strip().lower()
+                resolved_value = str(update.get("resolved_value", "")).strip().lower()
+                if not (ue and ua and resolved_value):
+                    continue
+                for item in attr_items:
+                    if not isinstance(item, dict):
+                        continue
+                    e = str(item.get("entity", "")).strip().lower()
+                    a = str(item.get("attribute", "")).strip().lower()
+                    v = str(item.get("value", "")).strip().lower()
+                    if e == ue and a == ua and v and v != resolved_value:
+                        penalty *= 0.25 * weight
+
+            if kind == "triple":
+                us = str(update.get("subject", "")).strip().lower()
+                up = str(update.get("predicate", "")).strip().lower()
+                ro = str(update.get("resolved_object", "")).strip().lower()
+                if not (us and up and ro):
+                    continue
+                for item in triple_items:
+                    if not isinstance(item, dict):
+                        continue
+                    s = str(item.get("subject", "")).strip().lower()
+                    p = str(item.get("predicate", "")).strip().lower()
+                    o = str(item.get("object", "")).strip().lower()
+                    if s == us and p == up and o and o != ro:
+                        penalty *= 0.35 * weight
+
+        return max(0.02, min(1.0, penalty))
+
     def save(self, request: EngineSaveRequest) -> EngineSaveResult:
         for chunk in request.chunks:
             enriched_meta = dict(chunk.metadata)
@@ -186,17 +251,22 @@ class _BaseInMemoryEngine(MemoryEngine):
 
     def search(self, request: EngineSearchRequest) -> EngineSearchResult:
         candidates = self._store.get(request.session_id, [])
+        resolution_updates = self._collect_resolution_updates(candidates)
         # 结构化评分：词匹配 + 三元组/属性质量 + score_hint 融合（权重可配置）
         scored: list[MemoryHit] = []
         for chunk_id, content, metadata in candidates:
+            if bool(metadata.get("memory_control_chunk", False)):
+                continue
+
             lexical = self._score_lexical(request.query, content)
             structural = self._score_structural(request.query, metadata)
             score_hint = max(0.0, min(1.0, float(metadata.get("_score_hint", 1.0))))
 
             relevance = self._combine_final_relevance(lexical, structural, score_hint)
+            relevance *= self._compute_resolution_penalty(metadata, resolution_updates)
 
             relevance = max(0.0, min(1.0, relevance))
-            scored.append(MemoryHit(chunk_id=chunk_id, content=content, relevance=relevance, metadata=metadata))
+            scored.append(MemoryHit(chunk_id=chunk_id, content=content, relevance=relevance, metadata=dict(metadata)))
 
         scored.sort(key=lambda x: x.relevance, reverse=True)
         return EngineSearchResult(engine=self.engine_type, hits=scored[: request.top_k])

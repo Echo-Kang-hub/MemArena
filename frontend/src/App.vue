@@ -47,6 +47,12 @@ const similarityStrategy = ref<'inverse_distance' | 'exp_decay' | 'linear'>('inv
 const keywordRerank = ref(false);
 const maxContextTokens = ref(1200);
 const reasoningHops = ref(1);
+const shortTermMode = ref<'None' | 'SlidingWindow' | 'TokenBuffer' | 'RollingSummary' | 'WorkingMemoryBlackboard'>('None');
+const stmWindowTurns = ref(5);
+const stmTokenBudget = ref(2000);
+const stmSummaryKeepRecentTurns = ref(4);
+const reflectorAutoWriteback = ref(false);
+const reflectorWritebackMinConfidence = ref(0.75);
 const datasetCases = ref<Array<{ case_id: string; input_text: string; expected_facts: string[]; session_id: string }>>([]);
 const builtinDatasets = ref<DatasetSummary[]>([]);
 const selectedDatasetName = ref('');
@@ -105,6 +111,13 @@ const providers = ['api', 'ollama', 'local'] as const;
 const summarizerMethods = ['llm', 'kmeans'] as const;
 const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'] as const;
 const computeDevices = ['cpu', 'cuda'] as const;
+const shortTermModes = [
+  'None',
+  'SlidingWindow',
+  'TokenBuffer',
+  'RollingSummary',
+  'WorkingMemoryBlackboard'
+] as const;
 
 const md = new MarkdownIt({
   html: false,
@@ -124,6 +137,9 @@ const batchInputModeLabel = computed(() =>
 );
 const isSummarizerProcessor = computed(() => config.value.processor === 'Summarizer');
 const isEntityExtractorProcessor = computed(() => config.value.processor === 'EntityExtractor');
+const showStmWindow = computed(() => shortTermMode.value === 'SlidingWindow');
+const showStmTokenBudget = computed(() => shortTermMode.value === 'TokenBuffer');
+const showStmRolling = computed(() => shortTermMode.value === 'RollingSummary');
 
 const isEntityTripleMode = computed(() => {
   const method = config.value.entity_extractor_method;
@@ -869,7 +885,13 @@ async function onRunBenchmark() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value,
         max_context_tokens: maxContextTokens.value,
-        reasoning_hops: reasoningHops.value
+        reasoning_hops: reasoningHops.value,
+        short_term_mode: shortTermMode.value,
+        stm_window_turns: stmWindowTurns.value,
+        stm_token_budget: stmTokenBudget.value,
+        stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+        reflector_auto_writeback: reflectorAutoWriteback.value,
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
       }
     }, requestTimeoutMs.value);
 
@@ -931,7 +953,13 @@ async function onRunBatchBenchmark() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value,
         max_context_tokens: maxContextTokens.value,
-        reasoning_hops: reasoningHops.value
+        reasoning_hops: reasoningHops.value,
+        short_term_mode: shortTermMode.value,
+        stm_window_turns: stmWindowTurns.value,
+        stm_token_budget: stmTokenBudget.value,
+        stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+        reflector_auto_writeback: reflectorAutoWriteback.value,
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
       },
       cases: casesToRun
     }, requestTimeoutMs.value);
@@ -998,7 +1026,13 @@ async function onRunBuiltinDataset() {
         similarity_strategy: similarityStrategy.value,
         keyword_rerank: keywordRerank.value,
         max_context_tokens: maxContextTokens.value,
-        reasoning_hops: reasoningHops.value
+        reasoning_hops: reasoningHops.value,
+        short_term_mode: shortTermMode.value,
+        stm_window_turns: stmWindowTurns.value,
+        stm_token_budget: stmTokenBudget.value,
+        stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
+        reflector_auto_writeback: reflectorAutoWriteback.value,
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
       }
     }, requestTimeoutMs.value);
 
@@ -1163,6 +1197,53 @@ function downloadCsvReport() {
               <span>Reasoning Hops (ReasoningChain + GraphEngine)</span>
               <input v-model.number="reasoningHops" type="number" min="1" max="3" class="select" />
             </label>
+          </div>
+
+          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <p class="mb-2 text-xs font-semibold text-arena-mint">Short-term Memory Params</p>
+            <label class="field">
+              <span>Short-term Mode</span>
+              <select v-model="shortTermMode" class="select">
+                <option v-for="x in shortTermModes" :key="x" :value="x">{{ x }}</option>
+              </select>
+            </label>
+            <label v-if="showStmWindow" class="field mt-2">
+              <span>Sliding Window Turns</span>
+              <input v-model.number="stmWindowTurns" type="number" min="1" max="30" class="select" />
+            </label>
+            <label v-if="showStmTokenBudget" class="field mt-2">
+              <span>Token Buffer Budget</span>
+              <input v-model.number="stmTokenBudget" type="number" min="128" max="16000" class="select" />
+            </label>
+            <label v-if="showStmRolling" class="field mt-2">
+              <span>Rolling Summary Keep Recent Turns</span>
+              <input v-model.number="stmSummaryKeepRecentTurns" type="number" min="1" max="12" class="select" />
+            </label>
+            <p class="mt-2 text-xs text-slate-400">
+              LTM 负责长期检索；STM 负责最近上下文焦点，二者会在后端合并排序后再交给 Assembler。
+            </p>
+          </div>
+
+          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <p class="mb-2 text-xs font-semibold text-arena-mint">Reflector Writeback</p>
+            <label class="flex items-center gap-2 text-sm text-slate-200">
+              <input v-model="reflectorAutoWriteback" type="checkbox" />
+              <span>Enable Auto Writeback (ConflictResolver)</span>
+            </label>
+            <label class="field mt-2">
+              <span>Writeback Min Confidence</span>
+              <input
+                v-model.number="reflectorWritebackMinConfidence"
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                class="select"
+              />
+            </label>
+            <p class="mt-2 text-xs text-slate-400">
+              自动写回会向会话写入控制块，用于抑制被裁决为过时的冲突值检索分数；建议仅在纠错场景开启。
+            </p>
           </div>
         </div>
       </section>

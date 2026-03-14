@@ -6,6 +6,12 @@ export type EntityExtractorMethod =
   | 'llm_attribute'
   | 'spacy_llm_triple'
   | 'spacy_llm_attribute';
+export type ShortTermMemoryMode =
+  | 'None'
+  | 'SlidingWindow'
+  | 'TokenBuffer'
+  | 'RollingSummary'
+  | 'WorkingMemoryBlackboard';
 
 export interface BenchmarkConfig {
   processor: 'RawLogger' | 'Summarizer' | 'EntityExtractor';
@@ -50,6 +56,12 @@ export interface BenchmarkRunRequest {
     keyword_rerank: boolean;
     max_context_tokens?: number | null;
     reasoning_hops?: number;
+    short_term_mode?: ShortTermMemoryMode;
+    stm_window_turns?: number;
+    stm_token_budget?: number;
+    stm_summary_keep_recent_turns?: number;
+    reflector_auto_writeback?: boolean;
+    reflector_writeback_min_confidence?: number;
   };
 }
 

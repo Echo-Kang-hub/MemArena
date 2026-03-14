@@ -64,11 +64,11 @@ def build_assembler(kind: AssemblerType) -> ContextAssembler:
     return mapping[kind]
 
 
-def build_reflector(kind: ReflectorType) -> MemoryReflector | None:
+def build_reflector(kind: ReflectorType, reflection_llm_client: Any | None = None) -> MemoryReflector | None:
     if kind == ReflectorType.none:
         return None
     mapping: dict[ReflectorType, MemoryReflector] = {
-        ReflectorType.generative_reflection: GenerativeReflectionReflector(),
+        ReflectorType.generative_reflection: GenerativeReflectionReflector(llm_client=reflection_llm_client),
         ReflectorType.conflict_resolver: ConflictResolverReflector(),
         ReflectorType.consolidator: ConsolidatorReflector(),
         ReflectorType.decay_filter: DecayFilterReflector(),

@@ -29,10 +29,12 @@ from app.models.contracts import (
     EngineType,
     EntityExtractorMethod,
     EvalRequest,
+    MemoryChunk,
     ProcessorType,
     RawConversationInput,
     ReflectRequest,
     ReflectorType,
+    ShortTermMemoryMode,
 )
 from app.services.request_audit import (
     query_audit_events,
@@ -41,12 +43,14 @@ from app.services.request_audit import (
     write_audit_event,
 )
 from app.services.dataset_loader import list_datasets, load_dataset_cases
+from app.services.short_term_memory import ShortTermMemoryManager
 from app.registry import build_assembler, build_engine, build_processor, build_reflector
 
 app = FastAPI(title="MemArena Backend", version="0.1.0")
 
 # 轻量内存任务状态表：用于前端轮询批量任务进度
 RUN_STATES: dict[str, dict] = {}
+STM_MANAGER = ShortTermMemoryManager()
 
 
 def _auto_collection_name(base_name: str, embedding_provider: str, embedding_model: str) -> str:
@@ -68,6 +72,73 @@ def _validate_processor_engine_mapping(payload: BenchmarkRunRequest) -> None:
 
     if payload.config.engine != EngineType.relational_engine:
         raise ValueError("EntityExtractor attribute modes require engine=RelationalEngine")
+
+
+def _merge_memory_hits(
+    ltm_hits,
+    stm_hits,
+    top_k: int,
+):
+    merged = []
+    seen: set[tuple[str, str]] = set()
+
+    for hit in [*stm_hits, *ltm_hits]:
+        key = (str(hit.chunk_id), str(hit.content))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+
+    merged.sort(key=lambda x: float(x.relevance), reverse=True)
+    return merged[: max(1, int(top_k))]
+
+
+def _extract_writeback_updates(reflector_result, min_confidence: float) -> list[dict]:
+    if reflector_result is None:
+        return []
+    stats = reflector_result.stats or {}
+    updates = stats.get("proposed_resolutions", [])
+    if not isinstance(updates, list):
+        return []
+    out: list[dict] = []
+    for item in updates:
+        if not isinstance(item, dict):
+            continue
+        confidence = float(item.get("confidence", 0.0) or 0.0)
+        if confidence < min_confidence:
+            continue
+        out.append(item)
+    return out
+
+
+def _apply_reflector_writeback(
+    *,
+    engine,
+    session_id: str,
+    reflector_result,
+    min_confidence: float,
+) -> int:
+    updates = _extract_writeback_updates(reflector_result, min_confidence=min_confidence)
+    if not updates:
+        return 0
+
+    control_chunk = MemoryChunk(
+        chunk_id=f"{session_id}-reflect-writeback-{uuid4().hex[:8]}",
+        session_id=session_id,
+        content=(
+            "Reflector auto writeback control chunk. "
+            "It suppresses stale conflicting values during retrieval ranking."
+        ),
+        tags=["reflector", "writeback", "control"],
+        metadata={
+            "memory_control_chunk": True,
+            "reflector": str(reflector_result.reflector.value),
+            "resolution_updates": updates,
+            "min_confidence": min_confidence,
+        },
+    )
+    engine.save(EngineSaveRequest(source=ProcessorType.raw_logger, chunks=[control_chunk]))
+    return len(updates)
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,6 +172,12 @@ def options() -> dict:
         "compute_devices": ["cpu", "cuda"],
         "max_concurrency_limit": 32,
         "similarity_strategies": ["inverse_distance", "exp_decay", "linear"],
+        "short_term_modes": [item.value for item in ShortTermMemoryMode],
+        "reflector_writeback": {
+            "supported": True,
+            "default_auto": False,
+            "default_min_confidence": 0.75,
+        },
     }
 
 
@@ -180,7 +257,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             collection_name=retrieval_cfg.collection_name,
         )
         assembler = build_assembler(payload.config.assembler)
-        reflector = build_reflector(payload.config.reflector)
+        reflector = build_reflector(payload.config.reflector, reflection_llm_client=summarizer_llm_client)
         bench = LLMJudgeBench(llm_client=judge_llm_client)
 
         raw_input = RawConversationInput(
@@ -191,6 +268,14 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
                 "llm_preview": f"{llm_client.provider}:{llm_client.model}",
                 "embedding_preview": embedding_client.embed(payload.input_text),
             },
+        )
+
+        STM_MANAGER.ingest(
+            session_id=payload.session_id,
+            text=payload.input_text,
+            mode=retrieval_cfg.short_term_mode,
+            summary_keep_recent_turns=retrieval_cfg.stm_summary_keep_recent_turns,
+            llm_client=summarizer_llm_client,
         )
 
         processor_output = processor.process(raw_input)
@@ -222,6 +307,18 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         else:
             search_result = engine.search(search_request)
 
+        stm_hits = STM_MANAGER.retrieve(
+            session_id=payload.session_id,
+            query=payload.input_text,
+            mode=retrieval_cfg.short_term_mode,
+            top_k=retrieval_cfg.top_k,
+            window_turns=retrieval_cfg.stm_window_turns,
+            token_budget=retrieval_cfg.stm_token_budget,
+            summary_keep_recent_turns=retrieval_cfg.stm_summary_keep_recent_turns,
+        )
+        effective_hits = _merge_memory_hits(search_result.hits, stm_hits, retrieval_cfg.top_k)
+        search_result = search_result.model_copy(update={"hits": effective_hits})
+
         assemble_result = assembler.assemble(
             AssembleRequest(
                 user_query=payload.input_text,
@@ -248,6 +345,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         )
 
         reflector_result = None
+        writeback_updates = 0
         if reflector is not None:
             reflector_result = await reflector.reflect(
                 ReflectRequest(
@@ -256,6 +354,13 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
                     memory_hits=search_result.hits,
                 )
             )
+            if retrieval_cfg.reflector_auto_writeback:
+                writeback_updates = _apply_reflector_writeback(
+                    engine=engine,
+                    session_id=payload.session_id,
+                    reflector_result=reflector_result,
+                    min_confidence=float(retrieval_cfg.reflector_writeback_min_confidence),
+                )
 
         response = BenchmarkRunResponse(
             run_id=cur_run_id,
@@ -273,6 +378,10 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
                 "run_id": cur_run_id,
                 "session_id": payload.session_id,
                 "hits": len(search_result.hits),
+                "stm_mode": retrieval_cfg.short_term_mode.value,
+                "stm_hits": len(stm_hits),
+                "reflector_writeback_enabled": retrieval_cfg.reflector_auto_writeback,
+                "reflector_writeback_updates": writeback_updates,
                 "agent_response_preview": agent_response[:200],
                 "metrics": response.eval_result.metrics.model_dump(),
             },
