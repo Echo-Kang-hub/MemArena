@@ -5,7 +5,11 @@ export type EntityExtractorMethod =
   | 'llm_triple'
   | 'llm_attribute'
   | 'spacy_llm_triple'
-  | 'spacy_llm_attribute';
+  | 'spacy_llm_attribute'
+  | 'mem0_user_facts'
+  | 'mem0_agent_facts'
+  | 'mem0_dual_facts';
+export type ReflectorLLMMode = 'Heuristic' | 'LLM' | 'LLMWithFallback';
 export type ShortTermMemoryMode =
   | 'None'
   | 'SlidingWindow'
@@ -62,6 +66,7 @@ export interface BenchmarkRunRequest {
     stm_summary_keep_recent_turns?: number;
     reflector_auto_writeback?: boolean;
     reflector_writeback_min_confidence?: number;
+    reflector_llm_mode?: ReflectorLLMMode;
   };
 }
 

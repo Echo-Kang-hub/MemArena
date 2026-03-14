@@ -4,6 +4,7 @@ import json
 import importlib
 import re
 from collections import Counter
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -106,6 +107,44 @@ def _extract_json_text(raw: str) -> str:
 
 def _build_chunk_id(session_id: str, suffix: str) -> str:
     return f"{session_id}-{suffix}-{uuid4().hex[:8]}"
+
+
+def _build_mem0_prompt(role: str, conversation_text: str) -> str:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if role == "assistant":
+        scope_line = "# [IMPORTANT]: GENERATE FACTS SOLELY BASED ON THE ASSISTANT'S MESSAGES. DO NOT INCLUDE INFORMATION FROM USER OR SYSTEM MESSAGES."
+        role_desc = "assistant"
+    else:
+        scope_line = "# [IMPORTANT]: GENERATE FACTS SOLELY BASED ON THE USER'S MESSAGES. DO NOT INCLUDE INFORMATION FROM ASSISTANT OR SYSTEM MESSAGES."
+        role_desc = "user"
+
+    return (
+        "You are a Personal Information Organizer specialized in extracting concise facts.\n"
+        f"{scope_line}\n"
+        "Return strict JSON with shape: {\"facts\": [\"...\"]}.\n"
+        "If nothing relevant exists, return {\"facts\": []}.\n"
+        f"- Today's date is {today}.\n"
+        "- Keep facts short, atomic, and in the same language as the input.\n"
+        "- Do not include examples or explanations.\n"
+        f"Following is a conversation text from the {role_desc}. Extract facts only from this text:\n"
+        f"{conversation_text}"
+    )
+
+
+def _heuristic_mem0_facts(text: str) -> list[str]:
+    sentences = _split_sentences(text)
+    facts: list[str] = []
+    for s in sentences:
+        ss = s.strip()
+        if not ss:
+            continue
+        if len(ss) < 4:
+            continue
+        if re.search(r"(喜欢|不喜欢|计划|打算|下周|明天|今天|提醒|会议|预算|交付|客户|出差)", ss, flags=re.IGNORECASE):
+            facts.append(ss)
+    if facts:
+        return facts[:12]
+    return sentences[:6]
 
 
 class RawLoggerProcessor(MemoryProcessor):
@@ -289,6 +328,26 @@ class EntityExtractorProcessor(MemoryProcessor):
         except Exception:
             return heuristic_attributes()
 
+    def _mem0_extract_facts(self, text: str, role: str) -> list[str]:
+        if not text.strip():
+            return []
+
+        if self.llm_client is None:
+            return _heuristic_mem0_facts(text)
+
+        prompt = _build_mem0_prompt(role=role, conversation_text=text)
+        purpose = "entity_extract_mem0_user" if role == "user" else "entity_extract_mem0_assistant"
+        raw = self.llm_client.generate(prompt, system_prompt="You extract memory facts as strict JSON.", purpose=purpose)
+        try:
+            parsed = json.loads(_extract_json_text(raw))
+            facts = parsed.get("facts", []) if isinstance(parsed, dict) else []
+            if not isinstance(facts, list):
+                return _heuristic_mem0_facts(text)
+            normalized = [str(x).strip() for x in facts if str(x).strip()]
+            return normalized[:20] if normalized else []
+        except Exception:
+            return _heuristic_mem0_facts(text)
+
     # 成熟版实体抽取：支持 LLM、spaCy+LLM，输出三元组或属性两类结构
     def process(self, payload: RawConversationInput) -> ProcessorOutput:
         entities = self._extract_candidates(payload.message)
@@ -296,6 +355,48 @@ class EntityExtractorProcessor(MemoryProcessor):
             EntityExtractorMethod.llm_triple,
             EntityExtractorMethod.spacy_llm_triple,
         }
+
+        if self.method in {
+            EntityExtractorMethod.mem0_user_facts,
+            EntityExtractorMethod.mem0_agent_facts,
+            EntityExtractorMethod.mem0_dual_facts,
+        }:
+            user_text = payload.message
+            assistant_text = str(payload.metadata.get("assistant_message", "") or "")
+
+            user_facts: list[str] = []
+            assistant_facts: list[str] = []
+            if self.method in {EntityExtractorMethod.mem0_user_facts, EntityExtractorMethod.mem0_dual_facts}:
+                user_facts = self._mem0_extract_facts(user_text, role="user")
+            if self.method in {EntityExtractorMethod.mem0_agent_facts, EntityExtractorMethod.mem0_dual_facts}:
+                assistant_facts = self._mem0_extract_facts(assistant_text, role="assistant")
+
+            lines: list[str] = []
+            attributes: list[dict[str, str]] = []
+            for f in user_facts:
+                lines.append(f"[user] {f}")
+                attributes.append({"entity": "user", "attribute": "fact", "value": f})
+            for f in assistant_facts:
+                lines.append(f"[assistant] {f}")
+                attributes.append({"entity": "assistant", "attribute": "fact", "value": f})
+
+            content = "mem0_facts:\n" + ("\n".join(lines) if lines else "(none)")
+            metadata = {
+                "entities": entities,
+                "attributes": attributes,
+                "user_facts": user_facts,
+                "assistant_facts": assistant_facts,
+                "method": self.method.value,
+                **payload.metadata,
+            }
+            chunk = MemoryChunk(
+                chunk_id=_build_chunk_id(payload.session_id, "ent"),
+                session_id=payload.session_id,
+                content=content,
+                tags=["entity", "attribute", "relational", "mem0", f"method:{self.method.value}"],
+                metadata=metadata,
+            )
+            return ProcessorOutput(source=ProcessorType.entity_extractor, chunks=[chunk])
 
         if is_triple_mode:
             triples = self._generate_triples(payload.message, entities)

@@ -33,6 +33,7 @@ from app.models.contracts import (
     ProcessorType,
     RawConversationInput,
     ReflectRequest,
+    ReflectorLLMMode,
     ReflectorType,
     ShortTermMemoryMode,
 )
@@ -70,6 +71,17 @@ def _validate_processor_engine_mapping(payload: BenchmarkRunRequest) -> None:
             raise ValueError("EntityExtractor triple modes require engine=GraphEngine")
         return
 
+    if method in {
+        EntityExtractorMethod.llm_attribute,
+        EntityExtractorMethod.spacy_llm_attribute,
+        EntityExtractorMethod.mem0_user_facts,
+        EntityExtractorMethod.mem0_agent_facts,
+        EntityExtractorMethod.mem0_dual_facts,
+    }:
+        if payload.config.engine != EngineType.relational_engine:
+            raise ValueError("EntityExtractor attribute/mem0 modes require engine=RelationalEngine")
+        return
+
     if payload.config.engine != EngineType.relational_engine:
         raise ValueError("EntityExtractor attribute modes require engine=RelationalEngine")
 
@@ -80,13 +92,15 @@ def _merge_memory_hits(
     top_k: int,
 ):
     merged = []
-    seen: set[tuple[str, str]] = set()
+    seen_content: set[str] = set()
 
     for hit in [*stm_hits, *ltm_hits]:
-        key = (str(hit.chunk_id), str(hit.content))
-        if key in seen:
+        norm_content = " ".join(str(hit.content).split()).strip().lower()
+        if not norm_content:
+            norm_content = str(hit.chunk_id)
+        if norm_content in seen_content:
             continue
-        seen.add(key)
+        seen_content.add(norm_content)
         merged.append(hit)
 
     merged.sort(key=lambda x: float(x.relevance), reverse=True)
@@ -159,12 +173,7 @@ def options() -> dict:
     return {
         "processors": [item.value for item in ProcessorType],
         "summarizer_methods": ["llm", "kmeans"],
-        "entity_extractor_methods": [
-            "llm_triple",
-            "llm_attribute",
-            "spacy_llm_triple",
-            "spacy_llm_attribute",
-        ],
+        "entity_extractor_methods": [item.value for item in EntityExtractorMethod],
         "engines": ["VectorEngine", "GraphEngine", "RelationalEngine"],
         "assemblers": [item.value for item in AssemblerType],
         "reflectors": [item.value for item in ReflectorType],
@@ -173,6 +182,7 @@ def options() -> dict:
         "max_concurrency_limit": 32,
         "similarity_strategies": ["inverse_distance", "exp_decay", "linear"],
         "short_term_modes": [item.value for item in ShortTermMemoryMode],
+        "reflector_llm_modes": [item.value for item in ReflectorLLMMode],
         "reflector_writeback": {
             "supported": True,
             "default_auto": False,
@@ -257,7 +267,11 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             collection_name=retrieval_cfg.collection_name,
         )
         assembler = build_assembler(payload.config.assembler)
-        reflector = build_reflector(payload.config.reflector, reflection_llm_client=summarizer_llm_client)
+        reflector = build_reflector(
+            payload.config.reflector,
+            reflection_llm_client=summarizer_llm_client,
+            llm_mode=retrieval_cfg.reflector_llm_mode,
+        )
         bench = LLMJudgeBench(llm_client=judge_llm_client)
 
         raw_input = RawConversationInput(

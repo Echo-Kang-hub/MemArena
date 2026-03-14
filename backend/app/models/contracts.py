@@ -63,6 +63,15 @@ class EntityExtractorMethod(str, Enum):
     llm_attribute = "llm_attribute"
     spacy_llm_triple = "spacy_llm_triple"
     spacy_llm_attribute = "spacy_llm_attribute"
+    mem0_user_facts = "mem0_user_facts"
+    mem0_agent_facts = "mem0_agent_facts"
+    mem0_dual_facts = "mem0_dual_facts"
+
+
+class ReflectorLLMMode(str, Enum):
+    heuristic = "Heuristic"
+    llm = "LLM"
+    llm_with_fallback = "LLMWithFallback"
 
 
 # 原始输入（单条对话）
@@ -213,6 +222,7 @@ class RetrievalConfig(BaseModel):
     stm_summary_keep_recent_turns: int = Field(default=4, ge=1, le=12)
     reflector_auto_writeback: bool = False
     reflector_writeback_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    reflector_llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback
 
 
 class BenchmarkRunRequest(BaseModel):

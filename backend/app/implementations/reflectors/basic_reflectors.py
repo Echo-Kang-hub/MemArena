@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.core.interfaces import MemoryReflector
-from app.models.contracts import ReflectRequest, ReflectResult, ReflectorType
+from app.models.contracts import ReflectRequest, ReflectResult, ReflectorLLMMode, ReflectorType
 
 
 def _tokenize(text: str) -> set[str]:
@@ -228,9 +228,31 @@ def _extract_themes(request: ReflectRequest) -> list[str]:
     return [x[0] for x in ranked[:6]]
 
 
+def _should_use_llm(mode: ReflectorLLMMode) -> bool:
+    return mode in {ReflectorLLMMode.llm, ReflectorLLMMode.llm_with_fallback}
+
+
+def _llm_json_or_none(llm_client: Any | None, prompt: str, purpose: str) -> dict[str, Any] | None:
+    if llm_client is None:
+        return None
+    try:
+        raw = llm_client.generate(prompt, system_prompt="你是严谨的记忆反思分析师。", purpose=purpose)
+        parsed = json.loads(_extract_json_text(raw))
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except Exception:
+        return None
+
+
 class GenerativeReflectionReflector(MemoryReflector):
-    def __init__(self, llm_client: Any | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
         self.llm_client = llm_client
+        self.llm_mode = llm_mode
 
     def _heuristic_reflect(self, request: ReflectRequest) -> tuple[list[str], dict[str, Any]]:
         themes = _extract_themes(request)
@@ -269,8 +291,9 @@ class GenerativeReflectionReflector(MemoryReflector):
         }
 
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
-        if self.llm_client is None:
+        if not _should_use_llm(self.llm_mode) or self.llm_client is None:
             insights, stats = self._heuristic_reflect(request)
+            stats["llm_mode"] = self.llm_mode.value
             return ReflectResult(reflector=ReflectorType.generative_reflection, insights=insights, stats=stats)
 
         memory_lines = "\n".join([f"- {hit.content}" for hit in request.memory_hits[:12]])
@@ -308,6 +331,14 @@ class GenerativeReflectionReflector(MemoryReflector):
 
 
 class ConflictResolverReflector(MemoryReflector):
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
+        self.llm_client = llm_client
+        self.llm_mode = llm_mode
+
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
         conflict_items = _find_conflict_items(request)
         triple_conflicts = _find_triple_conflicts(request)
@@ -336,10 +367,38 @@ class ConflictResolverReflector(MemoryReflector):
                 "建议按时间戳、用户纠正信号、来源置信度做冲突裁决并写回版本状态。",
                 "被用户明确否定的值应降级为 obsolete，同时保留审计轨迹避免静默覆盖。",
             ]
+
+        if _should_use_llm(self.llm_mode) and self.llm_client is not None and conflict_count > 0:
+            prompt = (
+                "你是冲突消解反思器。基于冲突数据生成可执行洞察。输出 JSON: "
+                '{"insights":["..."],"proposed_resolutions":[{"kind":"attribute|triple","confidence":0.0}]}\n\n'
+                f"latest_query: {request.latest_query}\n"
+                f"attribute_conflicts: {json.dumps(conflict_items[:10], ensure_ascii=False)}\n"
+                f"triple_conflicts: {json.dumps(triple_conflicts[:10], ensure_ascii=False)}\n"
+                f"heuristic_proposals: {json.dumps(proposed_resolutions[:20], ensure_ascii=False)}"
+            )
+            parsed = _llm_json_or_none(self.llm_client, prompt, "reflector_conflict_resolver")
+            if isinstance(parsed, dict):
+                llm_insights = parsed.get("insights", [])
+                if isinstance(llm_insights, list):
+                    cleaned = [str(x).strip() for x in llm_insights if str(x).strip()]
+                    if cleaned:
+                        insights = cleaned[:8]
+
+                llm_resolutions = parsed.get("proposed_resolutions", [])
+                if isinstance(llm_resolutions, list):
+                    normalized_updates: list[dict[str, Any]] = []
+                    for item in llm_resolutions:
+                        if isinstance(item, dict):
+                            normalized_updates.append(item)
+                    if normalized_updates:
+                        proposed_resolutions = normalized_updates[:20]
+
         return ReflectResult(
             reflector=ReflectorType.conflict_resolver,
             insights=insights,
             stats={
+                "llm_mode": self.llm_mode.value,
                 "conflict_count": conflict_count,
                 "conflict_items": conflict_items[:10],
                 "triple_conflicts": triple_conflicts[:10],
@@ -351,6 +410,14 @@ class ConflictResolverReflector(MemoryReflector):
 
 
 class ConsolidatorReflector(MemoryReflector):
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
+        self.llm_client = llm_client
+        self.llm_mode = llm_mode
+
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
         similar_pairs = _estimate_redundant_pairs(request.memory_hits)
         timeline_hint = "present_vs_past" if any(k in request.latest_query for k in ["曾经", "以前", "现在", "目前"]) else "none"
@@ -358,10 +425,27 @@ class ConsolidatorReflector(MemoryReflector):
             f"Consolidator 检测到 {similar_pairs} 对高相似记忆，可执行融合式更新以减少冗余。",
             "建议策略：只做近重复内容合并、摘要压缩与来源聚合，不直接做冲突裁决。",
         ]
+
+        if _should_use_llm(self.llm_mode) and self.llm_client is not None:
+            prompt = (
+                "你是去重合并反思器。请输出 JSON: {\"insights\":[\"...\"],\"merge_rules\":[\"...\"]}。\n\n"
+                f"latest_query: {request.latest_query}\n"
+                f"similar_pairs: {similar_pairs}\n"
+                f"sample_hits: {json.dumps([h.content for h in request.memory_hits[:6]], ensure_ascii=False)}"
+            )
+            parsed = _llm_json_or_none(self.llm_client, prompt, "reflector_consolidator")
+            if isinstance(parsed, dict):
+                llm_insights = parsed.get("insights", [])
+                if isinstance(llm_insights, list):
+                    cleaned = [str(x).strip() for x in llm_insights if str(x).strip()]
+                    if cleaned:
+                        insights = cleaned[:6]
+
         return ReflectResult(
             reflector=ReflectorType.consolidator,
             insights=insights,
             stats={
+                "llm_mode": self.llm_mode.value,
                 "similar_pairs": similar_pairs,
                 "timeline_hint": timeline_hint,
                 "role_boundary": "dedup_only",
@@ -398,12 +482,34 @@ class DecayFilterReflector(MemoryReflector):
 
 
 class InsightLinkerReflector(MemoryReflector):
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
+        self.llm_client = llm_client
+        self.llm_mode = llm_mode
+
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
         entities = _extract_entities("\n".join(hit.content for hit in request.memory_hits))
         predicted_links: list[str] = []
         if len(entities) >= 3:
             for i in range(min(len(entities) - 2, 3)):
                 predicted_links.append(f"{entities[i]} -> {entities[i + 2]}")
+
+        if _should_use_llm(self.llm_mode) and self.llm_client is not None and entities:
+            prompt = (
+                "你是知识连接反思器。请从给定实体中推断潜在连接，输出 JSON: {\"predicted_links\":[\"A -> B\"],\"insights\":[\"...\"]}。\n\n"
+                f"latest_query: {request.latest_query}\n"
+                f"entities: {json.dumps(entities[:20], ensure_ascii=False)}"
+            )
+            parsed = _llm_json_or_none(self.llm_client, prompt, "reflector_insight_linker")
+            if isinstance(parsed, dict):
+                links = parsed.get("predicted_links", [])
+                if isinstance(links, list):
+                    normalized = [str(x).strip() for x in links if str(x).strip()]
+                    if normalized:
+                        predicted_links = normalized[:8]
 
         insights = [
             "InsightLinker 已完成异步潜在连接推理（Link Prediction），可用于减少知识孤岛。",
@@ -412,11 +518,19 @@ class InsightLinkerReflector(MemoryReflector):
         return ReflectResult(
             reflector=ReflectorType.insight_linker,
             insights=insights,
-            stats={"predicted_links": predicted_links, "targets": ["GraphEngine"]},
+            stats={"llm_mode": self.llm_mode.value, "predicted_links": predicted_links, "targets": ["GraphEngine"]},
         )
 
 
 class AbstractionReflector(MemoryReflector):
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
+        self.llm_client = llm_client
+        self.llm_mode = llm_mode
+
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
         text = "\n".join(hit.content for hit in request.memory_hits)
         prefs: list[str] = []
@@ -432,6 +546,20 @@ class AbstractionReflector(MemoryReflector):
             if len(prefs) >= 5:
                 break
 
+        if _should_use_llm(self.llm_mode) and self.llm_client is not None and text.strip():
+            prompt = (
+                "你是用户画像抽象反思器。请提炼偏好与行为倾向，输出 JSON: {\"abstractions\":[\"...\"],\"insights\":[\"...\"]}。\n\n"
+                f"latest_query: {request.latest_query}\n"
+                f"memory_text: {text[:4000]}"
+            )
+            parsed = _llm_json_or_none(self.llm_client, prompt, "reflector_abstraction")
+            if isinstance(parsed, dict):
+                abstractions = parsed.get("abstractions", [])
+                if isinstance(abstractions, list):
+                    normalized = [str(x).strip() for x in abstractions if str(x).strip()]
+                    if normalized:
+                        prefs = normalized[:8]
+
         insights = [
             "AbstractionReflector 已将行为序列抽象为偏好/性格线索，用于提升“懂我”能力。",
             ("抽象结果: " + " | ".join(prefs)) if prefs else "当前可抽象线索较少，建议累积更多行为序列。",
@@ -439,5 +567,5 @@ class AbstractionReflector(MemoryReflector):
         return ReflectResult(
             reflector=ReflectorType.abstraction_reflector,
             insights=insights,
-            stats={"abstractions": prefs, "targets": ["RelationalEngine"]},
+            stats={"llm_mode": self.llm_mode.value, "abstractions": prefs, "targets": ["RelationalEngine"]},
         )

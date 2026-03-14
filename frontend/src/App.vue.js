@@ -37,6 +37,7 @@ const stmTokenBudget = ref(2000);
 const stmSummaryKeepRecentTurns = ref(4);
 const reflectorAutoWriteback = ref(false);
 const reflectorWritebackMinConfidence = ref(0.75);
+const reflectorLlmMode = ref('LLMWithFallback');
 const datasetCases = ref([]);
 const builtinDatasets = ref([]);
 const selectedDatasetName = ref('');
@@ -76,7 +77,16 @@ const reflectors = [
 ];
 const providers = ['api', 'ollama', 'local'];
 const summarizerMethods = ['llm', 'kmeans'];
-const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'];
+const entityExtractorMethods = [
+    'llm_triple',
+    'llm_attribute',
+    'spacy_llm_triple',
+    'spacy_llm_attribute',
+    'mem0_user_facts',
+    'mem0_agent_facts',
+    'mem0_dual_facts'
+];
+const reflectorLlmModes = ['Heuristic', 'LLM', 'LLMWithFallback'];
 const computeDevices = ['cpu', 'cuda'];
 const shortTermModes = [
     'None',
@@ -584,8 +594,15 @@ const batchSafetyInterpretation = computed(() => {
 const markdownReport = computed(() => {
     if (result.value) {
         const r = result.value;
-        const memoryLines = r.search_result.hits.length
-            ? r.search_result.hits
+        const stmHits = r.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
+        const ltmHits = r.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
+        const stmLines = stmHits.length
+            ? stmHits
+                .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
+                .join('\n')
+            : '- (none)';
+        const ltmLines = ltmHits.length
+            ? ltmHits
                 .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
                 .join('\n')
             : '- (none)';
@@ -601,8 +618,11 @@ const markdownReport = computed(() => {
             '',
             r.generated_response || '(empty)',
             '',
-            '## Agent Real-time Memory',
-            memoryLines,
+            '## Agent Real-time Memory (STM)',
+            stmLines,
+            '',
+            '## Agent Real-time Memory (LTM)',
+            ltmLines,
             '',
             '## Metrics',
             `- precision: ${r.eval_result.metrics.precision}`,
@@ -644,8 +664,15 @@ const markdownReport = computed(() => {
         const b = batchResult.value;
         const caseSections = b.case_results
             .map((c, idx) => {
-            const memoryLines = c.search_result.hits.length
-                ? c.search_result.hits
+            const stmHits = c.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
+            const ltmHits = c.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
+            const stmLines = stmHits.length
+                ? stmHits
+                    .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
+                    .join('\n')
+                : '  - (none)';
+            const ltmLines = ltmHits.length
+                ? ltmHits
                     .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
                     .join('\n')
                 : '  - (none)';
@@ -654,8 +681,10 @@ const markdownReport = computed(() => {
                 `- run_id: ${c.run_id}`,
                 '- Agent Reply:',
                 c.generated_response || '(empty)',
-                '- Agent Real-time Memory:',
-                memoryLines,
+                '- Agent Real-time Memory (STM):',
+                stmLines,
+                '- Agent Real-time Memory (LTM):',
+                ltmLines,
                 '- Metrics:',
                 `  - precision: ${c.eval_result.metrics.precision}`,
                 `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
@@ -792,7 +821,8 @@ async function onRunBenchmark() {
                 stm_token_budget: stmTokenBudget.value,
                 stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
                 reflector_auto_writeback: reflectorAutoWriteback.value,
-                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+                reflector_llm_mode: reflectorLlmMode.value
             }
         }, requestTimeoutMs.value);
         if (result.value?.run_id) {
@@ -853,7 +883,8 @@ async function onRunBatchBenchmark() {
                 stm_token_budget: stmTokenBudget.value,
                 stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
                 reflector_auto_writeback: reflectorAutoWriteback.value,
-                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+                reflector_llm_mode: reflectorLlmMode.value
             },
             cases: casesToRun
         }, requestTimeoutMs.value);
@@ -921,7 +952,8 @@ async function onRunBuiltinDataset() {
                 stm_token_budget: stmTokenBudget.value,
                 stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
                 reflector_auto_writeback: reflectorAutoWriteback.value,
-                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+                reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+                reflector_llm_mode: reflectorLlmMode.value
             }
         }, requestTimeoutMs.value);
         progressText.value = `Dataset Progress: 0/${plannedTotal} (queued)`;
@@ -1341,6 +1373,21 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.d
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
     ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
 });
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    value: (__VLS_ctx.reflectorLlmMode),
+    ...{ class: "select" },
+});
+for (const [x] of __VLS_getVForSourceType((__VLS_ctx.reflectorLlmModes))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        key: (x),
+        value: (x),
+    });
+    (x);
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "flex items-center gap-2 text-sm text-slate-200" },
 });
@@ -2068,6 +2115,8 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['flex']} */ ;
 /** @type {__VLS_StyleScopedClasses['items-center']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
@@ -2577,6 +2626,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             stmSummaryKeepRecentTurns: stmSummaryKeepRecentTurns,
             reflectorAutoWriteback: reflectorAutoWriteback,
             reflectorWritebackMinConfidence: reflectorWritebackMinConfidence,
+            reflectorLlmMode: reflectorLlmMode,
             builtinDatasets: builtinDatasets,
             selectedDatasetName: selectedDatasetName,
             datasetSampleSize: datasetSampleSize,
@@ -2598,6 +2648,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             providers: providers,
             summarizerMethods: summarizerMethods,
             entityExtractorMethods: entityExtractorMethods,
+            reflectorLlmModes: reflectorLlmModes,
             computeDevices: computeDevices,
             shortTermModes: shortTermModes,
             plannedBatchCaseCount: plannedBatchCaseCount,

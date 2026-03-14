@@ -14,7 +14,8 @@ import type {
   BatchBenchmarkRunResponse,
   BenchmarkConfig,
   BenchmarkRunResponse,
-  DatasetSummary
+  DatasetSummary,
+  ReflectorLLMMode
 } from './types';
 
 const config = ref<BenchmarkConfig>({
@@ -53,6 +54,7 @@ const stmTokenBudget = ref(2000);
 const stmSummaryKeepRecentTurns = ref(4);
 const reflectorAutoWriteback = ref(false);
 const reflectorWritebackMinConfidence = ref(0.75);
+const reflectorLlmMode = ref<ReflectorLLMMode>('LLMWithFallback');
 const datasetCases = ref<Array<{ case_id: string; input_text: string; expected_facts: string[]; session_id: string }>>([]);
 const builtinDatasets = ref<DatasetSummary[]>([]);
 const selectedDatasetName = ref('');
@@ -109,7 +111,16 @@ const reflectors = [
 ] as const;
 const providers = ['api', 'ollama', 'local'] as const;
 const summarizerMethods = ['llm', 'kmeans'] as const;
-const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'] as const;
+const entityExtractorMethods = [
+  'llm_triple',
+  'llm_attribute',
+  'spacy_llm_triple',
+  'spacy_llm_attribute',
+  'mem0_user_facts',
+  'mem0_agent_facts',
+  'mem0_dual_facts'
+] as const;
+const reflectorLlmModes = ['Heuristic', 'LLM', 'LLMWithFallback'] as const;
 const computeDevices = ['cpu', 'cuda'] as const;
 const shortTermModes = [
   'None',
@@ -668,8 +679,15 @@ const batchSafetyInterpretation = computed(() => {
 const markdownReport = computed(() => {
   if (result.value) {
     const r = result.value;
-    const memoryLines = r.search_result.hits.length
-      ? r.search_result.hits
+    const stmHits = r.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
+    const ltmHits = r.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
+    const stmLines = stmHits.length
+      ? stmHits
+          .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
+          .join('\n')
+      : '- (none)';
+    const ltmLines = ltmHits.length
+      ? ltmHits
           .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
           .join('\n')
       : '- (none)';
@@ -686,8 +704,11 @@ const markdownReport = computed(() => {
       '',
       r.generated_response || '(empty)',
       '',
-      '## Agent Real-time Memory',
-      memoryLines,
+      '## Agent Real-time Memory (STM)',
+      stmLines,
+      '',
+      '## Agent Real-time Memory (LTM)',
+      ltmLines,
       '',
       '## Metrics',
       `- precision: ${r.eval_result.metrics.precision}`,
@@ -734,8 +755,15 @@ const markdownReport = computed(() => {
     const b = batchResult.value;
     const caseSections = b.case_results
       .map((c, idx) => {
-        const memoryLines = c.search_result.hits.length
-          ? c.search_result.hits
+        const stmHits = c.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
+        const ltmHits = c.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
+        const stmLines = stmHits.length
+          ? stmHits
+              .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
+              .join('\n')
+          : '  - (none)';
+        const ltmLines = ltmHits.length
+          ? ltmHits
               .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
               .join('\n')
           : '  - (none)';
@@ -745,8 +773,10 @@ const markdownReport = computed(() => {
           `- run_id: ${c.run_id}`,
           '- Agent Reply:',
           c.generated_response || '(empty)',
-          '- Agent Real-time Memory:',
-          memoryLines,
+          '- Agent Real-time Memory (STM):',
+          stmLines,
+          '- Agent Real-time Memory (LTM):',
+          ltmLines,
           '- Metrics:',
           `  - precision: ${c.eval_result.metrics.precision}`,
           `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
@@ -891,7 +921,8 @@ async function onRunBenchmark() {
         stm_token_budget: stmTokenBudget.value,
         stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
         reflector_auto_writeback: reflectorAutoWriteback.value,
-        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+        reflector_llm_mode: reflectorLlmMode.value
       }
     }, requestTimeoutMs.value);
 
@@ -959,7 +990,8 @@ async function onRunBatchBenchmark() {
         stm_token_budget: stmTokenBudget.value,
         stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
         reflector_auto_writeback: reflectorAutoWriteback.value,
-        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+        reflector_llm_mode: reflectorLlmMode.value
       },
       cases: casesToRun
     }, requestTimeoutMs.value);
@@ -1032,7 +1064,8 @@ async function onRunBuiltinDataset() {
         stm_token_budget: stmTokenBudget.value,
         stm_summary_keep_recent_turns: stmSummaryKeepRecentTurns.value,
         reflector_auto_writeback: reflectorAutoWriteback.value,
-        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value
+        reflector_writeback_min_confidence: reflectorWritebackMinConfidence.value,
+        reflector_llm_mode: reflectorLlmMode.value
       }
     }, requestTimeoutMs.value);
 
@@ -1226,6 +1259,12 @@ function downloadCsvReport() {
 
           <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
             <p class="mb-2 text-xs font-semibold text-arena-mint">Reflector Writeback</p>
+            <label class="field">
+              <span>Reflector LLM Mode</span>
+              <select v-model="reflectorLlmMode" class="select">
+                <option v-for="x in reflectorLlmModes" :key="x" :value="x">{{ x }}</option>
+              </select>
+            </label>
             <label class="flex items-center gap-2 text-sm text-slate-200">
               <input v-model="reflectorAutoWriteback" type="checkbox" />
               <span>Enable Auto Writeback (ConflictResolver)</span>

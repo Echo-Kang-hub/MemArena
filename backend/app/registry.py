@@ -25,7 +25,7 @@ from app.implementations.reflectors.basic_reflectors import (
     GenerativeReflectionReflector,
     InsightLinkerReflector,
 )
-from app.models.contracts import AssemblerType, EngineType, ProcessorType, ReflectorType
+from app.models.contracts import AssemblerType, EngineType, ProcessorType, ReflectorLLMMode, ReflectorType
 from app.models.contracts import EntityExtractorMethod, SummarizerMethod
 
 
@@ -64,15 +64,19 @@ def build_assembler(kind: AssemblerType) -> ContextAssembler:
     return mapping[kind]
 
 
-def build_reflector(kind: ReflectorType, reflection_llm_client: Any | None = None) -> MemoryReflector | None:
+def build_reflector(
+    kind: ReflectorType,
+    reflection_llm_client: Any | None = None,
+    llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+) -> MemoryReflector | None:
     if kind == ReflectorType.none:
         return None
     mapping: dict[ReflectorType, MemoryReflector] = {
-        ReflectorType.generative_reflection: GenerativeReflectionReflector(llm_client=reflection_llm_client),
-        ReflectorType.conflict_resolver: ConflictResolverReflector(),
-        ReflectorType.consolidator: ConsolidatorReflector(),
+        ReflectorType.generative_reflection: GenerativeReflectionReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
+        ReflectorType.conflict_resolver: ConflictResolverReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
+        ReflectorType.consolidator: ConsolidatorReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
         ReflectorType.decay_filter: DecayFilterReflector(),
-        ReflectorType.insight_linker: InsightLinkerReflector(),
-        ReflectorType.abstraction_reflector: AbstractionReflector(),
+        ReflectorType.insight_linker: InsightLinkerReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
+        ReflectorType.abstraction_reflector: AbstractionReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
     }
     return mapping[kind]

@@ -160,6 +160,34 @@ docker compose up --build
   - `stm_token_budget`
   - `stm_summary_keep_recent_turns`
 - 后端会将 STM 命中与 LTM 命中合并排序，再交给 Assembler。
+- 合并时会按内容去重，避免同一句在 STM/LTM 同时重复展示。
+- 前端 Markdown 报告会分栏输出：
+  - `Agent Real-time Memory (STM)`
+  - `Agent Real-time Memory (LTM)`
+
+### EntityExtractor 新增 mem0 事实提取方案
+- 现有 `entity_extractor_method` 除四种结构化方案外，新增：
+  - `mem0_user_facts`
+  - `mem0_agent_facts`
+  - `mem0_dual_facts`
+- 约束：`mem0_*` 必须使用 `RelationalEngine`。
+- 说明：
+  - `mem0_user_facts` 仅从用户文本抽取事实。
+  - `mem0_agent_facts` 仅从 assistant 消息抽取事实（读取 `metadata.assistant_message`）。
+  - `mem0_dual_facts` 同时抽取两侧事实并合并。
+
+### Reflector LLM 模式
+- 在 `retrieval` 中新增 `reflector_llm_mode`：
+  - `Heuristic`
+  - `LLM`
+  - `LLMWithFallback`（默认）
+- 当前支持 LLM 路径的 reflector：
+  - `GenerativeReflection`
+  - `ConflictResolver`
+  - `Consolidator`
+  - `InsightLinker`
+  - `AbstractionReflector`
+- 前端配置面板已提供该模式下拉选择。
 
 ### Assembler 对比汇总脚本
 - 单次跑各 Assembler 基准：

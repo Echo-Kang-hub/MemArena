@@ -30,10 +30,23 @@
 	- `llm_attribute`：LLM 属性抽取。
 	- `spacy_llm_triple`：spaCy 实体候选 + LLM 三元组抽取。
 	- `spacy_llm_attribute`：spaCy 实体候选 + LLM 属性抽取。
+	- `mem0_user_facts`：mem0 风格用户事实提取（仅从用户文本抽取）。
+	- `mem0_agent_facts`：mem0 风格助手事实提取（仅从 assistant_message 抽取）。
+	- `mem0_dual_facts`：同时抽取 user + assistant 双通道事实。
 - 引擎映射约束：
 	- `*_triple` 必须使用 `GraphEngine`。
-	- `*_attribute` 必须使用 `RelationalEngine`。
+	- `*_attribute` 与 `mem0_*` 必须使用 `RelationalEngine`。
 - 运行说明：当 spaCy 不可用时，后端会自动降级为启发式实体候选；当外部 LLM 不可用（如 401/429）或返回不可解析结果时，会回退为启发式三元组/属性抽取，避免结构化输出为空。
+
+### EntityExtractor.mem0 系列补充
+- 功能作用：面向“长期记忆事实化”，优先抽取可复用事实，不强调三元组结构。
+- 输入约束：
+	- `mem0_user_facts` 仅看用户文本。
+	- `mem0_agent_facts` 仅看 `metadata.assistant_message`。
+	- `mem0_dual_facts` 分别抽取并合并。
+- 输出结构：统一落为属性型条目，便于 `RelationalEngine` 检索与后续审计。
+- 优点：对偏好、计划、约束类事实更鲁棒。
+- 缺点：关系路径推理能力弱于三元组模式。
 
 ## 2. Memory Engine（记忆黑盒引擎）
 
@@ -107,16 +120,20 @@
 
 ### GenerativeReflection
 - 定义：自动生成高阶洞察建议。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
 
 ### ConflictResolver
 - 定义：检测潜在冲突并给出消解建议。
 - 适用：更正/纠错场景，关注错误事实的收敛清理效率。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
+- 自动写回联动：可把 `proposed_resolutions` 写回控制块，用于检索阶段抑制过时值分数。
 
 ### Consolidator
 - 定义：相似度检测 + 融合式更新 + 错误纠正，减少冗余并处理属性过期。
 - 适用：用户身份/属性发生阶段性变化（如“曾经是程序员，现在是摄影师”）。
 - 纠错策略：若用户明确指出之前错误，优先清理错误事实并保留纠正后事实。
 - 对应引擎：`RelationalEngine` / `GraphEngine`。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
 
 ### DecayFilter
 - 定义：基于 Ebbinghaus 遗忘曲线打分，按保留分衰减长尾记忆权重。
@@ -127,11 +144,27 @@
 - 定义：异步推理潜在实体连接（Link Prediction），补全缺失关系。
 - 适用：知识图谱稀疏、知识孤岛场景。
 - 对应引擎：`GraphEngine`。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
 
 ### AbstractionReflector
 - 定义：将行为序列抽象为性格/偏好总结，形成高层用户画像。
 - 适用：长期个性化与偏好建模。
 - 对应引擎：`RelationalEngine`。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
+
+### Reflector 全局 LLM 模式
+- 配置项：`retrieval.reflector_llm_mode`
+	- `Heuristic`：只走规则/启发式。
+	- `LLM`：优先走 LLM。
+	- `LLMWithFallback`：LLM 失败时自动回退启发式（默认推荐）。
+- 前端已提供统一下拉选择。
+
+## 6. STM/LTM 合并与展示约束
+- 检索合并时会按内容去重（避免 STM 与 LTM 同文重复显示）。
+- 前端 Markdown 报告会分开展示：
+	- `Agent Real-time Memory (STM)`
+	- `Agent Real-time Memory (LTM)`
+- 说明：若内容完全相同，最终仅保留一条以减少噪声；优先保留 STM 命中顺序。 
 
 ## 5. Evaluation Bench（评估台）
 
