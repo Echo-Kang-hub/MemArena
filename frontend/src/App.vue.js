@@ -410,6 +410,13 @@ const batchDerivedRows = computed(() => {
         r.eval_result.metrics.info_loss <= 0.2).length;
     const passRate = passCount / cases.length;
     const worstF1 = sortedF1[0];
+    const reasoningDetails = cases
+        .map((r) => r.search_result.hits?.[0]?.metadata?.reasoning_chain_details)
+        .filter((x) => Array.isArray(x));
+    const reasoningChainCounts = reasoningDetails.map((arr) => arr.length).filter((v) => v > 0);
+    const reasoningPriorities = reasoningDetails.flatMap((arr) => arr.map((d) => Number(d.priority)).filter((v) => Number.isFinite(v)));
+    const reasoningHops = reasoningDetails.flatMap((arr) => arr.map((d) => Number(d.hop)).filter((v) => Number.isFinite(v)));
+    const reasoningSeedTouches = reasoningDetails.flatMap((arr) => arr.map((d) => Number(d.seed_touch ? 1 : 0)));
     const extraRows = [];
     if (batchResult.value.avg_metrics.recall_at_k != null) {
         extraRows.push({
@@ -465,6 +472,38 @@ const batchDerivedRows = computed(() => {
             label: 'Avg Context Distraction',
             value: `${(batchResult.value.avg_metrics.context_distraction * 100).toFixed(1)}%`,
             hint: '批量平均上下文干扰度，越低越好。'
+        });
+    }
+    if (reasoningChainCounts.length > 0) {
+        const meanChainCount = reasoningChainCounts.reduce((s, v) => s + v, 0) / reasoningChainCounts.length;
+        extraRows.push({
+            label: 'Avg Reasoning Chain Count',
+            value: meanChainCount.toFixed(2),
+            hint: '单样本推理链数量，过高可能引入噪声。'
+        });
+    }
+    if (reasoningPriorities.length > 0) {
+        const meanPriority = reasoningPriorities.reduce((s, v) => s + v, 0) / reasoningPriorities.length;
+        extraRows.push({
+            label: 'Avg Reasoning Priority',
+            value: meanPriority.toFixed(3),
+            hint: '链路优先级均值，越高代表链路与问题更贴近。'
+        });
+    }
+    if (reasoningHops.length > 0) {
+        const meanHop = reasoningHops.reduce((s, v) => s + v, 0) / reasoningHops.length;
+        extraRows.push({
+            label: 'Avg Reasoning Hop',
+            value: meanHop.toFixed(2),
+            hint: '推理链平均跳数，越低通常越直接。'
+        });
+    }
+    if (reasoningSeedTouches.length > 0) {
+        const seedRatio = reasoningSeedTouches.reduce((s, v) => s + Number(v), 0) / reasoningSeedTouches.length;
+        extraRows.push({
+            label: 'Reasoning Seed Touch Ratio',
+            value: `${(seedRatio * 100).toFixed(1)}%`,
+            hint: '链路是否命中种子实体的比例，越高越稳定。'
         });
     }
     return [
@@ -559,6 +598,20 @@ const markdownReport = computed(() => {
             `- consistency_score: ${r.eval_result.metrics.consistency_score ?? 'N/A'}`,
             `- rejection_rate: ${r.eval_result.metrics.rejection_rate ?? 'N/A'}`,
             `- rejection_correctness_unknown: ${r.eval_result.metrics.rejection_correctness_unknown ?? 'N/A'}`,
+            `- convergence_speed: ${r.eval_result.metrics.convergence_speed ?? 'N/A'}`,
+            `- context_distraction: ${r.eval_result.metrics.context_distraction ?? 'N/A'}`,
+            ...(singleReasoningChainDetails.value.length > 0
+                ? [
+                    '',
+                    '## Reasoning Quality',
+                    `- seed_entities: ${singleReasoningSeeds.value.join(', ') || '(none)'}`,
+                    `- chain_count: ${singleReasoningChainDetails.value.length}`,
+                    `- avg_priority: ${(singleReasoningChainDetails.value.reduce((s, d) => s + Number(d.priority || 0), 0) /
+                        Math.max(singleReasoningChainDetails.value.length, 1)).toFixed(4)}`,
+                    `- avg_hop: ${(singleReasoningChainDetails.value.reduce((s, d) => s + Number(d.hop || 0), 0) /
+                        Math.max(singleReasoningChainDetails.value.length, 1)).toFixed(4)}`
+                ]
+                : []),
             '',
             '## Judge Rationale',
             r.eval_result.judge_rationale || '(empty)',
@@ -618,6 +671,8 @@ const markdownReport = computed(() => {
             `- info_loss: ${b.avg_metrics.info_loss}`,
             `- rejection_rate: ${b.avg_metrics.rejection_rate ?? 'N/A'}`,
             `- rejection_correctness_unknown: ${b.avg_metrics.rejection_correctness_unknown ?? 'N/A'}`,
+            `- convergence_speed: ${b.avg_metrics.convergence_speed ?? 'N/A'}`,
+            `- context_distraction: ${b.avg_metrics.context_distraction ?? 'N/A'}`,
             '',
             '## Case Details',
             caseSections

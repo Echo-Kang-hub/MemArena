@@ -157,6 +157,13 @@
 		- `convergence_smoke_YYYYMMDD_HHMMSS.json`
 		- `convergence_smoke_YYYYMMDD_HHMMSS.csv`
 
+### 批量导出（Reasoning 对比）
+- 批量 CSV 会额外输出推理链质量列，便于不同 Assembler 横向比较：
+	- `reasoning_chain_count`
+	- `reasoning_avg_priority`
+	- `reasoning_avg_hop`
+	- `reasoning_seed_touch_ratio`
+
 ## 维护约定
 - 新增任何方案后，必须同步更新本文件。
 - 方案下线或行为变化后，必须同步修改“定义/优缺点/适用场景”。

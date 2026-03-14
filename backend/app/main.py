@@ -324,6 +324,56 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
     avg_convergence_speed = avg_optional_metric("convergence_speed")
     avg_context_distraction = avg_optional_metric("context_distraction")
 
+    def extract_reasoning_stats(item: BenchmarkRunResponse) -> tuple[float | None, float | None, float | None, float | None]:
+        hits = item.search_result.hits
+        if not hits:
+            return None, None, None, None
+        metadata = hits[0].metadata or {}
+        details = metadata.get("reasoning_chain_details", [])
+        if not isinstance(details, list) or not details:
+            chains = metadata.get("reasoning_chains", [])
+            if isinstance(chains, list) and chains:
+                return float(len(chains)), None, None, None
+            return None, None, None, None
+
+        chain_count = float(len(details))
+        priorities: list[float] = []
+        hops: list[float] = []
+        seed_touch_cnt = 0
+        for d in details:
+            if not isinstance(d, dict):
+                continue
+            if "priority" in d:
+                try:
+                    priorities.append(float(d.get("priority")))
+                except Exception:
+                    pass
+            if "hop" in d:
+                try:
+                    hops.append(float(d.get("hop")))
+                except Exception:
+                    pass
+            if bool(d.get("seed_touch", False)):
+                seed_touch_cnt += 1
+
+        avg_priority = (sum(priorities) / len(priorities)) if priorities else None
+        avg_hop = (sum(hops) / len(hops)) if hops else None
+        seed_touch_ratio = (seed_touch_cnt / len(details)) if details else None
+        return chain_count, avg_priority, avg_hop, seed_touch_ratio
+
+    reasoning_rows = [extract_reasoning_stats(r) for r in case_results]
+
+    def avg_reasoning(idx: int) -> float | None:
+        vals = [row[idx] for row in reasoning_rows if row[idx] is not None]
+        if not vals:
+            return None
+        return float(sum(vals) / len(vals))
+
+    avg_reasoning_chain_count = avg_reasoning(0)
+    avg_reasoning_priority = avg_reasoning(1)
+    avg_reasoning_hop = avg_reasoning(2)
+    avg_reasoning_seed_touch_ratio = avg_reasoning(3)
+
     unknown_count = sum(
         1 for r in case_results if r.eval_result.metrics.rejection_correctness_unknown is not None
     )
@@ -370,9 +420,14 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         "rejection_correctness_unknown",
         "convergence_speed",
         "context_distraction",
+        "reasoning_chain_count",
+        "reasoning_avg_priority",
+        "reasoning_avg_hop",
+        "reasoning_seed_touch_ratio",
         "judge_rationale",
     ])
     for idx, item in enumerate(case_results, start=1):
+        chain_count, avg_priority, avg_hop, seed_touch_ratio = extract_reasoning_stats(item)
         writer.writerow(
             [
                 idx,
@@ -387,6 +442,10 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
                 "" if item.eval_result.metrics.rejection_correctness_unknown is None else f"{item.eval_result.metrics.rejection_correctness_unknown:.4f}",
                 "" if item.eval_result.metrics.convergence_speed is None else f"{item.eval_result.metrics.convergence_speed:.4f}",
                 "" if item.eval_result.metrics.context_distraction is None else f"{item.eval_result.metrics.context_distraction:.4f}",
+                "" if chain_count is None else f"{chain_count:.0f}",
+                "" if avg_priority is None else f"{avg_priority:.4f}",
+                "" if avg_hop is None else f"{avg_hop:.4f}",
+                "" if seed_touch_ratio is None else f"{seed_touch_ratio:.4f}",
                 item.eval_result.judge_rationale,
             ]
         )
@@ -403,6 +462,10 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         "" if avg_rejection_correctness_unknown is None else f"{avg_rejection_correctness_unknown:.4f}",
         "" if avg_convergence_speed is None else f"{avg_convergence_speed:.4f}",
         "" if avg_context_distraction is None else f"{avg_context_distraction:.4f}",
+        "" if avg_reasoning_chain_count is None else f"{avg_reasoning_chain_count:.4f}",
+        "" if avg_reasoning_priority is None else f"{avg_reasoning_priority:.4f}",
+        "" if avg_reasoning_hop is None else f"{avg_reasoning_hop:.4f}",
+        "" if avg_reasoning_seed_touch_ratio is None else f"{avg_reasoning_seed_touch_ratio:.4f}",
         "",
     ])
     writer.writerow([])
