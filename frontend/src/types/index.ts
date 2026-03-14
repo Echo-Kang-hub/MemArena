@@ -42,6 +42,7 @@ export interface EvalMetrics {
 
 export interface BenchmarkRunResponse {
   run_id: string;
+  generated_response?: string;
   assemble_result: {
     prompt: string;
     preview_blocks: Array<{ role: string; text: string }>;

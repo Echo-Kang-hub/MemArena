@@ -48,6 +48,7 @@ const isolateSessions = ref(true);
 const maxConcurrency = ref(3);
 const batchCaseCount = ref(5);
 const requestTimeoutMs = ref(120000);
+const includeRawJudgeInMarkdown = ref(false);
 const progressText = ref('');
 const elapsedMs = ref(0);
 const lastRunDurationMs = ref<number | null>(null);
@@ -325,6 +326,125 @@ const batchSafetyInterpretation = computed(() => {
   }
   return '未知问题拒答正确率偏低，建议优先排查误答模式与拒答策略。';
 });
+
+const markdownReport = computed(() => {
+  if (result.value) {
+    const r = result.value;
+    const memoryLines = r.search_result.hits.length
+      ? r.search_result.hits
+          .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
+          .join('\n')
+      : '- (none)';
+
+    return [
+      '# MemArena Test Report',
+      '',
+      '## Meta',
+      `- run_id: ${r.run_id}`,
+      `- mode: single`,
+      `- generated_at: ${new Date().toISOString()}`,
+      '',
+      '## Agent Reply',
+      '',
+      r.generated_response || '(empty)',
+      '',
+      '## Agent Real-time Memory',
+      memoryLines,
+      '',
+      '## Metrics',
+      `- precision: ${r.eval_result.metrics.precision}`,
+      `- faithfulness: ${r.eval_result.metrics.faithfulness}`,
+      `- info_loss: ${r.eval_result.metrics.info_loss}`,
+      `- recall_at_k: ${r.eval_result.metrics.recall_at_k ?? 'N/A'}`,
+      `- qa_accuracy: ${r.eval_result.metrics.qa_accuracy ?? 'N/A'}`,
+      `- qa_f1: ${r.eval_result.metrics.qa_f1 ?? 'N/A'}`,
+      `- consistency_score: ${r.eval_result.metrics.consistency_score ?? 'N/A'}`,
+      `- rejection_rate: ${r.eval_result.metrics.rejection_rate ?? 'N/A'}`,
+      `- rejection_correctness_unknown: ${r.eval_result.metrics.rejection_correctness_unknown ?? 'N/A'}`,
+      '',
+      '## Judge Rationale',
+      r.eval_result.judge_rationale || '(empty)',
+      ...(includeRawJudgeInMarkdown.value
+        ? [
+            '',
+            '## Raw Judge Output',
+            r.eval_result.raw_judge_output || '(empty)'
+          ]
+        : [])
+    ].join('\n');
+  }
+
+  if (batchResult.value) {
+    const b = batchResult.value;
+    const caseSections = b.case_results
+      .map((c, idx) => {
+        const memoryLines = c.search_result.hits.length
+          ? c.search_result.hits
+              .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
+              .join('\n')
+          : '  - (none)';
+
+        return [
+          `### Case ${idx + 1}`,
+          `- run_id: ${c.run_id}`,
+          '- Agent Reply:',
+          c.generated_response || '(empty)',
+          '- Agent Real-time Memory:',
+          memoryLines,
+          '- Metrics:',
+          `  - precision: ${c.eval_result.metrics.precision}`,
+          `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
+          `  - info_loss: ${c.eval_result.metrics.info_loss}`,
+          `  - rejection_rate: ${c.eval_result.metrics.rejection_rate ?? 'N/A'}`,
+          `  - rejection_correctness_unknown: ${c.eval_result.metrics.rejection_correctness_unknown ?? 'N/A'}`,
+          ...(includeRawJudgeInMarkdown.value
+            ? [
+                '  - raw_judge_output:',
+                `    ${c.eval_result.raw_judge_output || '(empty)'}`
+              ]
+            : []),
+          ''
+        ].join('\n');
+      })
+      .join('\n');
+
+    return [
+      '# MemArena Test Report',
+      '',
+      '## Meta',
+      `- run_id: ${b.run_id}`,
+      `- mode: batch`,
+      `- cases: ${b.case_results.length}`,
+      `- generated_at: ${new Date().toISOString()}`,
+      '',
+      '## Batch Avg Metrics',
+      `- precision: ${b.avg_metrics.precision}`,
+      `- faithfulness: ${b.avg_metrics.faithfulness}`,
+      `- info_loss: ${b.avg_metrics.info_loss}`,
+      `- rejection_rate: ${b.avg_metrics.rejection_rate ?? 'N/A'}`,
+      `- rejection_correctness_unknown: ${b.avg_metrics.rejection_correctness_unknown ?? 'N/A'}`,
+      '',
+      '## Case Details',
+      caseSections
+    ].join('\n');
+  }
+
+  return '';
+});
+
+function downloadMarkdownReport() {
+  if (!markdownReport.value) return;
+  const blob = new Blob([markdownReport.value], { type: 'text/markdown;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const runId = result.value?.run_id || batchResult.value?.run_id || 'report';
+  link.href = url;
+  link.download = `memarena-report-${runId}.md`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
 
 onBeforeUnmount(() => {
   stopRunTimer();
@@ -731,6 +851,10 @@ function downloadCsvReport() {
         >
           评测口径：Precision/Faithfulness/InfoLoss 由 LLM Judge 给分；Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown 为规则法自动评估。
         </p>
+        <label class="mb-3 flex items-center gap-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-2 text-xs text-slate-200">
+          <input v-model="includeRawJudgeInMarkdown" type="checkbox" />
+          <span>导出 .md 时包含 Raw Judge Output</span>
+        </label>
 
         <div v-if="result" class="space-y-4">
           <MetricBars :metrics="result.eval_result.metrics" />
@@ -779,6 +903,14 @@ function downloadCsvReport() {
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Raw Judge Output</h3>
             <pre class="max-h-48 overflow-auto text-xs text-slate-200">{{ result.eval_result.raw_judge_output || 'N/A' }}</pre>
+          </div>
+
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Markdown Report Preview</h3>
+            <pre class="max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{{ markdownReport }}</pre>
+            <button class="mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" @click="downloadMarkdownReport">
+              Download .md Report
+            </button>
           </div>
         </div>
 
@@ -829,6 +961,13 @@ function downloadCsvReport() {
             <button class="mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" @click="downloadCsvReport">
               Download CSV Report
             </button>
+            <button class="ml-2 mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" @click="downloadMarkdownReport">
+              Download .md Report
+            </button>
+          </div>
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Markdown Report Preview</h3>
+            <pre class="max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{{ markdownReport }}</pre>
           </div>
         </div>
 

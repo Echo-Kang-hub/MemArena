@@ -208,6 +208,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             save_result=save_result,
             search_result=search_result,
             assemble_result=assemble_result,
+            generated_response=agent_response,
             eval_result=eval_result,
             reflector_result=reflector_result,
         )

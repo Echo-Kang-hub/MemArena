@@ -187,6 +187,7 @@ class BenchmarkRunResponse(BaseModel):
     save_result: EngineSaveResult
     search_result: EngineSearchResult
     assemble_result: AssembleResult
+    generated_response: str = ""
     eval_result: EvalResult
     reflector_result: ReflectResult | None = None
 
