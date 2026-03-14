@@ -10,8 +10,21 @@ export type EntityExtractorMethod =
 export interface BenchmarkConfig {
   processor: 'RawLogger' | 'Summarizer' | 'EntityExtractor';
   engine: 'VectorEngine' | 'GraphEngine' | 'RelationalEngine';
-  assembler: 'SystemInjector' | 'XMLTagging' | 'TimelineRollover';
-  reflector: 'None' | 'GenerativeReflection' | 'ConflictResolver';
+  assembler:
+    | 'SystemInjector'
+    | 'XMLTagging'
+    | 'TimelineRollover'
+    | 'ReverseTimeline'
+    | 'RankedPruning'
+    | 'ReasoningChain';
+  reflector:
+    | 'None'
+    | 'GenerativeReflection'
+    | 'ConflictResolver'
+    | 'Consolidator'
+    | 'DecayFilter'
+    | 'InsightLinker'
+    | 'AbstractionReflector';
   llm_provider: ProviderType;
   chat_llm_provider?: ProviderType;
   judge_llm_provider?: ProviderType;
@@ -35,6 +48,8 @@ export interface BenchmarkRunRequest {
     collection_name: string;
     similarity_strategy: 'inverse_distance' | 'exp_decay' | 'linear';
     keyword_rerank: boolean;
+    max_context_tokens?: number | null;
+    reasoning_hops?: number;
   };
 }
 
@@ -48,6 +63,8 @@ export interface EvalMetrics {
   consistency_score?: number | null;
   rejection_rate?: number | null;
   rejection_correctness_unknown?: number | null;
+  convergence_speed?: number | null;
+  context_distraction?: number | null;
 }
 
 export interface BenchmarkRunResponse {
@@ -63,7 +80,22 @@ export interface BenchmarkRunResponse {
     raw_judge_output?: string | null;
   };
   search_result: {
-    hits: Array<{ content: string; relevance: number }>;
+    hits: Array<{
+      content: string;
+      relevance: number;
+      metadata?: {
+        reasoning_chains?: string[];
+        reasoning_seed_entities?: string[];
+        reasoning_chain_details?: Array<{
+          chain: string;
+          hop: number;
+          seed_touch: boolean;
+          lexical_overlap: number;
+          priority: number;
+        }>;
+        [key: string]: unknown;
+      };
+    }>;
   };
 }
 

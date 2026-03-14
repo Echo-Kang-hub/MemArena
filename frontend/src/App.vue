@@ -45,6 +45,8 @@ const minRelevance = ref(0);
 const collectionName = ref('memarena_memory');
 const similarityStrategy = ref<'inverse_distance' | 'exp_decay' | 'linear'>('inverse_distance');
 const keywordRerank = ref(false);
+const maxContextTokens = ref(1200);
+const reasoningHops = ref(1);
 const datasetCases = ref<Array<{ case_id: string; input_text: string; expected_facts: string[]; session_id: string }>>([]);
 const builtinDatasets = ref<DatasetSummary[]>([]);
 const selectedDatasetName = ref('');
@@ -82,8 +84,23 @@ let runStartTs = 0;
 
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'] as const;
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
-const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const;
-const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
+const assemblers = [
+  'SystemInjector',
+  'XMLTagging',
+  'TimelineRollover',
+  'ReverseTimeline',
+  'RankedPruning',
+  'ReasoningChain'
+] as const;
+const reflectors = [
+  'None',
+  'GenerativeReflection',
+  'ConflictResolver',
+  'Consolidator',
+  'DecayFilter',
+  'InsightLinker',
+  'AbstractionReflector'
+] as const;
 const providers = ['api', 'ollama', 'local'] as const;
 const summarizerMethods = ['llm', 'kmeans'] as const;
 const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'] as const;
@@ -176,7 +193,9 @@ async function copyBatchDiagnostic() {
     `avg_qa_f1=${m.qa_f1 ?? 'N/A'}`,
     `avg_consistency_score=${m.consistency_score ?? 'N/A'}`,
     `avg_rejection_rate=${m.rejection_rate ?? 'N/A'}`,
-    `avg_rejection_correctness_unknown=${m.rejection_correctness_unknown ?? 'N/A'}`
+    `avg_rejection_correctness_unknown=${m.rejection_correctness_unknown ?? 'N/A'}`,
+    `avg_convergence_speed=${m.convergence_speed ?? 'N/A'}`,
+    `avg_context_distraction=${m.context_distraction ?? 'N/A'}`
   ];
 
   if (entityHealthState.value) {
@@ -304,6 +323,51 @@ const finishedDurationLabel = computed(() => {
   return formatDuration(lastRunDurationMs.value);
 });
 
+const singleReasoningChains = computed(() => {
+  if (!result.value) {
+    return [] as string[];
+  }
+  const firstHit = result.value.search_result.hits[0];
+  const meta = firstHit?.metadata;
+  const chains = meta && Array.isArray(meta.reasoning_chains)
+    ? (meta.reasoning_chains as unknown[])
+    : [];
+  return chains.map((c) => String(c)).filter(Boolean).slice(0, 20);
+});
+
+const singleReasoningSeeds = computed(() => {
+  if (!result.value) {
+    return [] as string[];
+  }
+  const firstHit = result.value.search_result.hits[0];
+  const meta = firstHit?.metadata;
+  const seeds = meta && Array.isArray(meta.reasoning_seed_entities)
+    ? (meta.reasoning_seed_entities as unknown[])
+    : [];
+  return seeds.map((s) => String(s)).filter(Boolean).slice(0, 20);
+});
+
+const singleReasoningChainDetails = computed(() => {
+  if (!result.value) {
+    return [] as Array<{ chain: string; hop: number; seed_touch: boolean; lexical_overlap: number; priority: number }>;
+  }
+  const firstHit = result.value.search_result.hits[0];
+  const details = firstHit?.metadata?.reasoning_chain_details;
+  if (!Array.isArray(details)) {
+    return [];
+  }
+  return details
+    .map((d) => ({
+      chain: String(d?.chain ?? ''),
+      hop: Number(d?.hop ?? 0),
+      seed_touch: Boolean(d?.seed_touch),
+      lexical_overlap: Number(d?.lexical_overlap ?? 0),
+      priority: Number(d?.priority ?? 0)
+    }))
+    .filter((d) => d.chain)
+    .slice(0, 20);
+});
+
 const singleDerivedRows = computed(() => {
   if (!result.value) {
     return [] as Array<{ label: string; value: string; hint: string }>;
@@ -362,6 +426,20 @@ const singleDerivedRows = computed(() => {
       label: 'Rejection@Unknown',
       value: `${(result.value.eval_result.metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
       hint: '仅在未知问题子集统计：拒答是否正确。'
+    });
+  }
+  if (result.value.eval_result.metrics.convergence_speed != null) {
+    extraRows.push({
+      label: 'Convergence Speed',
+      value: `${result.value.eval_result.metrics.convergence_speed.toFixed(2)} cycles`,
+      hint: '纠错后错误事实被洗掉所需周期估计，越低越好。'
+    });
+  }
+  if (result.value.eval_result.metrics.context_distraction != null) {
+    extraRows.push({
+      label: 'Context Distraction',
+      value: `${(result.value.eval_result.metrics.context_distraction * 100).toFixed(1)}%`,
+      hint: '注入上下文中的噪声占比估计，越低越好。'
     });
   }
 
@@ -447,6 +525,20 @@ const batchDerivedRows = computed(() => {
       label: 'Avg Rejection@Unknown',
       value: `${(batchResult.value.avg_metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
       hint: '仅未知问题子集统计的批量拒答正确率。'
+    });
+  }
+  if (batchResult.value.avg_metrics.convergence_speed != null) {
+    extraRows.push({
+      label: 'Avg Convergence Speed',
+      value: `${batchResult.value.avg_metrics.convergence_speed.toFixed(2)} cycles`,
+      hint: '批量平均纠错收敛周期估计，越低越好。'
+    });
+  }
+  if (batchResult.value.avg_metrics.context_distraction != null) {
+    extraRows.push({
+      label: 'Avg Context Distraction',
+      value: `${(batchResult.value.avg_metrics.context_distraction * 100).toFixed(1)}%`,
+      hint: '批量平均上下文干扰度，越低越好。'
     });
   }
 
@@ -715,7 +807,9 @@ async function onRunBenchmark() {
         min_relevance: minRelevance.value,
         collection_name: collectionName.value,
         similarity_strategy: similarityStrategy.value,
-        keyword_rerank: keywordRerank.value
+        keyword_rerank: keywordRerank.value,
+        max_context_tokens: maxContextTokens.value,
+        reasoning_hops: reasoningHops.value
       }
     }, requestTimeoutMs.value);
 
@@ -775,7 +869,9 @@ async function onRunBatchBenchmark() {
         min_relevance: minRelevance.value,
         collection_name: collectionName.value,
         similarity_strategy: similarityStrategy.value,
-        keyword_rerank: keywordRerank.value
+        keyword_rerank: keywordRerank.value,
+        max_context_tokens: maxContextTokens.value,
+        reasoning_hops: reasoningHops.value
       },
       cases: casesToRun
     }, requestTimeoutMs.value);
@@ -840,7 +936,9 @@ async function onRunBuiltinDataset() {
         min_relevance: minRelevance.value,
         collection_name: collectionName.value,
         similarity_strategy: similarityStrategy.value,
-        keyword_rerank: keywordRerank.value
+        keyword_rerank: keywordRerank.value,
+        max_context_tokens: maxContextTokens.value,
+        reasoning_hops: reasoningHops.value
       }
     }, requestTimeoutMs.value);
 
@@ -994,6 +1092,18 @@ function downloadCsvReport() {
               <span>Enable Keyword Rerank (0.3 blend)</span>
             </label>
           </div>
+
+          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <p class="mb-2 text-xs font-semibold text-arena-mint">Context Assembly Params</p>
+            <label class="field">
+              <span>Max Context Tokens (RankedPruning)</span>
+              <input v-model.number="maxContextTokens" type="number" min="64" max="8192" class="select" />
+            </label>
+            <label class="field mt-2">
+              <span>Reasoning Hops (ReasoningChain + GraphEngine)</span>
+              <input v-model.number="reasoningHops" type="number" min="1" max="3" class="select" />
+            </label>
+          </div>
         </div>
       </section>
 
@@ -1123,9 +1233,9 @@ function downloadCsvReport() {
         <h2 class="panel-title">Results Dashboard</h2>
         <p
           class="mb-3 rounded-lg border border-slate-600/60 bg-slate-900/50 p-2 text-xs text-slate-300"
-          title="LLM Judge: Precision/Faithfulness/InfoLoss。&#10;规则法: Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown。"
+          title="LLM Judge: Precision/Faithfulness/InfoLoss。&#10;规则法: Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown、Convergence Speed、Context Distraction。"
         >
-          评测口径：Precision/Faithfulness/InfoLoss 由 LLM Judge 给分；Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown 为规则法自动评估。
+          评测口径：Precision/Faithfulness/InfoLoss 由 LLM Judge 给分；Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown、Convergence Speed、Context Distraction 为规则法自动评估。
         </p>
         <label class="mb-3 flex items-center gap-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-2 text-xs text-slate-200">
           <input v-model="includeRawJudgeInMarkdown" type="checkbox" />
@@ -1169,6 +1279,36 @@ function downloadCsvReport() {
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Prompt Preview</h3>
             <pre class="max-h-60 overflow-auto text-xs text-slate-200">{{ result.assemble_result.prompt }}</pre>
+          </div>
+
+          <div v-if="singleReasoningChains.length > 0" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Reasoning Chains</h3>
+            <p v-if="singleReasoningSeeds.length > 0" class="mb-2 text-[11px] text-slate-400">
+              Seed Entities: {{ singleReasoningSeeds.join(', ') }}
+            </p>
+            <div v-if="singleReasoningChainDetails.length > 0" class="mb-2 overflow-auto rounded-md border border-slate-700/60 bg-slate-900/40">
+              <table class="min-w-full text-[11px] text-slate-200">
+                <thead class="bg-slate-800/70 text-slate-300">
+                  <tr>
+                    <th class="px-2 py-1 text-left">Priority</th>
+                    <th class="px-2 py-1 text-left">Hop</th>
+                    <th class="px-2 py-1 text-left">Seed</th>
+                    <th class="px-2 py-1 text-left">Overlap</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(d, idx) in singleReasoningChainDetails" :key="`detail-${idx}-${d.chain}`" class="border-t border-slate-800/60">
+                    <td class="px-2 py-1">{{ d.priority.toFixed(3) }}</td>
+                    <td class="px-2 py-1">{{ d.hop }}</td>
+                    <td class="px-2 py-1">{{ d.seed_touch ? 'Y' : 'N' }}</td>
+                    <td class="px-2 py-1">{{ (d.lexical_overlap * 100).toFixed(1) }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ul class="max-h-40 list-disc space-y-1 overflow-auto pl-5 text-xs text-slate-200">
+              <li v-for="(chain, idx) in singleReasoningChains" :key="`${idx}-${chain}`">{{ chain }}</li>
+            </ul>
           </div>
 
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">

@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     relational_relevance_fallback_lexical_weight: float = 0.90
     relational_relevance_fallback_hint_weight: float = 0.10
 
+    context_token_budget: int = 1200
+    graph_reasoning_max_chains: int = 24
+
     sqlite_path: str = str(DEFAULT_DATA_DIR / "memarena.db")
     chroma_persist_dir: str = str(DEFAULT_DATA_DIR / "chroma")
     chroma_collection_name: str = "memarena_memory"

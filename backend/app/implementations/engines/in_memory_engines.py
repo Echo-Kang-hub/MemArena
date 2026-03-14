@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 import math
 import re
 import threading
@@ -343,6 +343,126 @@ class VectorEngine(MemoryEngine):
 class GraphEngine(_BaseInMemoryEngine):
     def __init__(self) -> None:
         super().__init__(EngineType.graph_engine)
+        self._adjacency: dict[str, dict[str, list[tuple[str, str, str]]]] = defaultdict(lambda: defaultdict(list))
+        self._adjacency_seen: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
+
+    def _append_triples_to_adjacency(self, session_id: str, triples: Any) -> None:
+        if not isinstance(triples, list):
+            return
+        for item in triples:
+            if not isinstance(item, dict):
+                continue
+            s = str(item.get("subject", "")).strip()
+            p = str(item.get("predicate", "")).strip()
+            o = str(item.get("object", "")).strip()
+            if not (s and p and o):
+                continue
+            t = (s, p, o)
+            dedup_key = (s.lower(), p.lower(), o.lower())
+            if dedup_key in self._adjacency_seen[session_id]:
+                continue
+            self._adjacency_seen[session_id].add(dedup_key)
+            self._adjacency[session_id][s.lower()].append(t)
+            self._adjacency[session_id][o.lower()].append(t)
+
+    def save(self, request: EngineSaveRequest) -> EngineSaveResult:
+        result = super().save(request)
+        for chunk in request.chunks:
+            self._append_triples_to_adjacency(chunk.session_id, chunk.metadata.get("triples", []))
+        return result
+
+    def search_with_reasoning(self, request: EngineSearchRequest, hops: int = 1, max_chains: int = 24) -> EngineSearchResult:
+        base_result = self.search(request)
+        if not base_result.hits:
+            return base_result
+
+        seed_entities: set[str] = set()
+        for hit in base_result.hits:
+            triples = (hit.metadata or {}).get("triples", [])
+            if not isinstance(triples, list):
+                continue
+            for t in triples:
+                if not isinstance(t, dict):
+                    continue
+                s = str(t.get("subject", "")).strip().lower()
+                o = str(t.get("object", "")).strip().lower()
+                if s:
+                    seed_entities.add(s)
+                if o:
+                    seed_entities.add(o)
+
+        if not seed_entities:
+            return base_result
+
+        hops = max(1, int(hops))
+        max_chains = max(1, int(max_chains))
+        query_terms = self._tokenize(request.query)
+
+        queue: deque[tuple[str, int]] = deque((ent, 0) for ent in seed_entities)
+        visited_entities: set[str] = set(seed_entities)
+        seen_triples: set[tuple[str, str, str]] = set()
+        chains: list[tuple[float, int, dict[str, Any]]] = []
+        adjacency = self._adjacency.get(request.session_id, {})
+
+        while queue and len(chains) < max_chains * 4:
+            ent, depth = queue.popleft()
+            for s, p, o in adjacency.get(ent, []):
+                triple_key = (s.lower(), p.lower(), o.lower())
+                if triple_key not in seen_triples:
+                    seen_triples.add(triple_key)
+                    seed_touch = int((s.lower() in seed_entities) or (o.lower() in seed_entities))
+                    chain_text = f"{s} -> {p} -> {o}"
+                    triple_terms = self._tokenize(s) | self._tokenize(p) | self._tokenize(o)
+                    lexical_overlap = 0.0
+                    if query_terms:
+                        lexical_overlap = len(query_terms.intersection(triple_terms)) / max(len(query_terms), 1)
+                    # 排序优先级：种子命中 > 词法重叠 > 低跳数。
+                    priority = (2.0 * seed_touch) + lexical_overlap + (1.0 / (1 + depth))
+                    chains.append(
+                        (
+                            priority,
+                            depth,
+                            {
+                                "chain": chain_text,
+                                "hop": depth,
+                                "seed_touch": bool(seed_touch),
+                                "lexical_overlap": round(float(lexical_overlap), 4),
+                                "priority": round(float(priority), 4),
+                            },
+                        )
+                    )
+                    if len(chains) >= max_chains * 4:
+                        break
+
+                if depth + 1 > hops:
+                    continue
+                for next_ent in (s.lower(), o.lower()):
+                    if next_ent and next_ent not in visited_entities:
+                        visited_entities.add(next_ent)
+                        queue.append((next_ent, depth + 1))
+
+        if chains:
+            chains.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+            compact_chains: list[str] = []
+            compact_details: list[dict[str, Any]] = []
+            seen_chain_text: set[str] = set()
+            for _, __, detail in chains:
+                text = str(detail.get("chain", "")).strip()
+                if text in seen_chain_text:
+                    continue
+                seen_chain_text.add(text)
+                compact_chains.append(text)
+                compact_details.append(detail)
+                if len(compact_chains) >= max_chains:
+                    break
+
+            enriched_meta = dict(base_result.hits[0].metadata or {})
+            enriched_meta["reasoning_chains"] = compact_chains
+            enriched_meta["reasoning_chain_details"] = compact_details
+            enriched_meta["reasoning_seed_entities"] = sorted(seed_entities)
+            base_result.hits[0].metadata = enriched_meta
+
+        return base_result
 
 
 class RelationalEngine(_BaseInMemoryEngine):

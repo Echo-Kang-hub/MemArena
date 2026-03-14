@@ -73,6 +73,7 @@
 ### SystemInjector
 - 定义：将记忆注入系统提示词上下文。
 - 特点：简单直观，通用性强。
+- 置顶记忆（Pinned Memory）：支持。若 `metadata.pinned=true` 或标签含 `pinned/core`，会优先放在记忆块前部。
 
 ### XMLTagging
 - 定义：用 XML 标签隔离记忆与用户输入。
@@ -81,6 +82,23 @@
 ### TimelineRollover
 - 定义：按时间线平铺记忆片段。
 - 特点：对时序任务可读性更强。
+
+### ReverseTimeline
+- 定义：倒序时间线平铺（最近记忆优先）。
+- 特点：强化 Recency 偏好，适合“最新状态优先”的场景。
+
+### RankedPruning
+- 定义：按相关度评分排序后，在 Token Budget 内动态截断低分片段。
+- 特点：优先保证高相关记忆进入上下文，降低噪声干扰。
+- 参数：`retrieval.max_context_tokens`（默认读取后端 `context_token_budget`）。
+
+### ReasoningChain
+- 定义：针对 `GraphEngine` 注入“推理路径 + 参考记忆”，而非仅注入最终事实。
+- 特点：显式提供逻辑链条，提升复杂关系推理可解释性。
+- 参数：`retrieval.reasoning_hops`（默认 1，范围 1~3）。
+- 引擎要求：建议配合 `GraphEngine`；后端会调用多跳邻居扩展并在 metadata 中生成 `reasoning_chains`。
+- 排序与压缩：优先保留“命中种子实体 + 低跳数”的链路，并去重后截断到 `GRAPH_REASONING_MAX_CHAINS`，避免链路噪声与冗余。
+- 质量明细：在 metadata 中额外输出 `reasoning_chain_details`，包含 `hop`、`seed_touch`、`lexical_overlap`、`priority`，用于前端可解释展示与调参诊断。
 
 ## 4. Memory Reflector（异步反思器）
 
@@ -92,6 +110,28 @@
 
 ### ConflictResolver
 - 定义：检测潜在冲突并给出消解建议。
+- 适用：更正/纠错场景，关注错误事实的收敛清理效率。
+
+### Consolidator
+- 定义：相似度检测 + 融合式更新 + 错误纠正，减少冗余并处理属性过期。
+- 适用：用户身份/属性发生阶段性变化（如“曾经是程序员，现在是摄影师”）。
+- 纠错策略：若用户明确指出之前错误，优先清理错误事实并保留纠正后事实。
+- 对应引擎：`RelationalEngine` / `GraphEngine`。
+
+### DecayFilter
+- 定义：基于 Ebbinghaus 遗忘曲线打分，按保留分衰减长尾记忆权重。
+- 适用：长对话中的性能退化控制与检索噪声抑制。
+- 对应引擎：`VectorEngine` / `RelationalEngine`。
+
+### InsightLinker
+- 定义：异步推理潜在实体连接（Link Prediction），补全缺失关系。
+- 适用：知识图谱稀疏、知识孤岛场景。
+- 对应引擎：`GraphEngine`。
+
+### AbstractionReflector
+- 定义：将行为序列抽象为性格/偏好总结，形成高层用户画像。
+- 适用：长期个性化与偏好建模。
+- 对应引擎：`RelationalEngine`。
 
 ## 5. Evaluation Bench（评估台）
 
@@ -100,6 +140,22 @@
 - 输出：precision、faithfulness、info_loss、judge_rationale。
 - 输出扩展：raw_judge_output（用于排查评估模型返回格式问题）。
 - 说明：当外部模型不可用时，会回退到规则评估以保障流程可运行。
+- Reflector 相关指标：`convergence_speed`（收敛速度）。
+- 指标含义：在用户更正后，系统预计需要几轮对话/反思周期才能将错误事实彻底洗掉；数值越小越好。
+- Assembler 相关指标：`context_distraction`（上下文干扰度）。
+- 指标含义：注入的检索上下文中，非相关记忆占比估计值；数值越低越好。
+
+### ConvergenceSpeed 冒烟验证
+- 推荐命令：`D:/AppDownload/miniconda3/envs/mema_env/python.exe backend/scripts/smoke_convergence_speed.py`
+- 脚本特性：
+	- 使用 FastAPI `TestClient` 进行 API 内部调用，不依赖外部 uvicorn 进程。
+	- 使用 Python 原生 Unicode 字符串，避免 Windows 终端中文乱码导致的误判。
+	- 同时输出：
+		- `ConflictResolver` / `Consolidator` 的 API 回归结果；
+		- 双冲突组确定性探针（期望 `convergence_speed=3.0`）。
+	- 自动写入报告到 `backend/data/reports/`：
+		- `convergence_smoke_YYYYMMDD_HHMMSS.json`
+		- `convergence_smoke_YYYYMMDD_HHMMSS.csv`
 
 ## 维护约定
 - 新增任何方案后，必须同步更新本文件。

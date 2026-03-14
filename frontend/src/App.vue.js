@@ -29,6 +29,8 @@ const minRelevance = ref(0);
 const collectionName = ref('memarena_memory');
 const similarityStrategy = ref('inverse_distance');
 const keywordRerank = ref(false);
+const maxContextTokens = ref(1200);
+const reasoningHops = ref(1);
 const datasetCases = ref([]);
 const builtinDatasets = ref([]);
 const selectedDatasetName = ref('');
@@ -49,8 +51,23 @@ let timerHandle = null;
 let runStartTs = 0;
 const processors = ['RawLogger', 'Summarizer', 'EntityExtractor'];
 const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'];
-const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'];
-const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'];
+const assemblers = [
+    'SystemInjector',
+    'XMLTagging',
+    'TimelineRollover',
+    'ReverseTimeline',
+    'RankedPruning',
+    'ReasoningChain'
+];
+const reflectors = [
+    'None',
+    'GenerativeReflection',
+    'ConflictResolver',
+    'Consolidator',
+    'DecayFilter',
+    'InsightLinker',
+    'AbstractionReflector'
+];
 const providers = ['api', 'ollama', 'local'];
 const summarizerMethods = ['llm', 'kmeans'];
 const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'];
@@ -128,7 +145,9 @@ async function copyBatchDiagnostic() {
         `avg_qa_f1=${m.qa_f1 ?? 'N/A'}`,
         `avg_consistency_score=${m.consistency_score ?? 'N/A'}`,
         `avg_rejection_rate=${m.rejection_rate ?? 'N/A'}`,
-        `avg_rejection_correctness_unknown=${m.rejection_correctness_unknown ?? 'N/A'}`
+        `avg_rejection_correctness_unknown=${m.rejection_correctness_unknown ?? 'N/A'}`,
+        `avg_convergence_speed=${m.convergence_speed ?? 'N/A'}`,
+        `avg_context_distraction=${m.context_distraction ?? 'N/A'}`
     ];
     if (entityHealthState.value) {
         lines.push('', '[Entity Health]', `level=${entityHealthState.value.level}`, entityHealthState.value.message, entityHealthState.value.details, '', 'Recent failures:');
@@ -243,6 +262,48 @@ const finishedDurationLabel = computed(() => {
     }
     return formatDuration(lastRunDurationMs.value);
 });
+const singleReasoningChains = computed(() => {
+    if (!result.value) {
+        return [];
+    }
+    const firstHit = result.value.search_result.hits[0];
+    const meta = firstHit?.metadata;
+    const chains = meta && Array.isArray(meta.reasoning_chains)
+        ? meta.reasoning_chains
+        : [];
+    return chains.map((c) => String(c)).filter(Boolean).slice(0, 20);
+});
+const singleReasoningSeeds = computed(() => {
+    if (!result.value) {
+        return [];
+    }
+    const firstHit = result.value.search_result.hits[0];
+    const meta = firstHit?.metadata;
+    const seeds = meta && Array.isArray(meta.reasoning_seed_entities)
+        ? meta.reasoning_seed_entities
+        : [];
+    return seeds.map((s) => String(s)).filter(Boolean).slice(0, 20);
+});
+const singleReasoningChainDetails = computed(() => {
+    if (!result.value) {
+        return [];
+    }
+    const firstHit = result.value.search_result.hits[0];
+    const details = firstHit?.metadata?.reasoning_chain_details;
+    if (!Array.isArray(details)) {
+        return [];
+    }
+    return details
+        .map((d) => ({
+        chain: String(d?.chain ?? ''),
+        hop: Number(d?.hop ?? 0),
+        seed_touch: Boolean(d?.seed_touch),
+        lexical_overlap: Number(d?.lexical_overlap ?? 0),
+        priority: Number(d?.priority ?? 0)
+    }))
+        .filter((d) => d.chain)
+        .slice(0, 20);
+});
 const singleDerivedRows = computed(() => {
     if (!result.value) {
         return [];
@@ -298,6 +359,20 @@ const singleDerivedRows = computed(() => {
             label: 'Rejection@Unknown',
             value: `${(result.value.eval_result.metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
             hint: '仅在未知问题子集统计：拒答是否正确。'
+        });
+    }
+    if (result.value.eval_result.metrics.convergence_speed != null) {
+        extraRows.push({
+            label: 'Convergence Speed',
+            value: `${result.value.eval_result.metrics.convergence_speed.toFixed(2)} cycles`,
+            hint: '纠错后错误事实被洗掉所需周期估计，越低越好。'
+        });
+    }
+    if (result.value.eval_result.metrics.context_distraction != null) {
+        extraRows.push({
+            label: 'Context Distraction',
+            value: `${(result.value.eval_result.metrics.context_distraction * 100).toFixed(1)}%`,
+            hint: '注入上下文中的噪声占比估计，越低越好。'
         });
     }
     return [
@@ -376,6 +451,20 @@ const batchDerivedRows = computed(() => {
             label: 'Avg Rejection@Unknown',
             value: `${(batchResult.value.avg_metrics.rejection_correctness_unknown * 100).toFixed(1)}%`,
             hint: '仅未知问题子集统计的批量拒答正确率。'
+        });
+    }
+    if (batchResult.value.avg_metrics.convergence_speed != null) {
+        extraRows.push({
+            label: 'Avg Convergence Speed',
+            value: `${batchResult.value.avg_metrics.convergence_speed.toFixed(2)} cycles`,
+            hint: '批量平均纠错收敛周期估计，越低越好。'
+        });
+    }
+    if (batchResult.value.avg_metrics.context_distraction != null) {
+        extraRows.push({
+            label: 'Avg Context Distraction',
+            value: `${(batchResult.value.avg_metrics.context_distraction * 100).toFixed(1)}%`,
+            hint: '批量平均上下文干扰度，越低越好。'
         });
     }
     return [
@@ -624,7 +713,9 @@ async function onRunBenchmark() {
                 min_relevance: minRelevance.value,
                 collection_name: collectionName.value,
                 similarity_strategy: similarityStrategy.value,
-                keyword_rerank: keywordRerank.value
+                keyword_rerank: keywordRerank.value,
+                max_context_tokens: maxContextTokens.value,
+                reasoning_hops: reasoningHops.value
             }
         }, requestTimeoutMs.value);
         if (result.value?.run_id) {
@@ -677,7 +768,9 @@ async function onRunBatchBenchmark() {
                 min_relevance: minRelevance.value,
                 collection_name: collectionName.value,
                 similarity_strategy: similarityStrategy.value,
-                keyword_rerank: keywordRerank.value
+                keyword_rerank: keywordRerank.value,
+                max_context_tokens: maxContextTokens.value,
+                reasoning_hops: reasoningHops.value
             },
             cases: casesToRun
         }, requestTimeoutMs.value);
@@ -737,7 +830,9 @@ async function onRunBuiltinDataset() {
                 min_relevance: minRelevance.value,
                 collection_name: collectionName.value,
                 similarity_strategy: similarityStrategy.value,
-                keyword_rerank: keywordRerank.value
+                keyword_rerank: keywordRerank.value,
+                max_context_tokens: maxContextTokens.value,
+                reasoning_hops: reasoningHops.value
             }
         }, requestTimeoutMs.value);
         progressText.value = `Dataset Progress: 0/${plannedTotal} (queued)`;
@@ -1060,6 +1155,34 @@ if (__VLS_ctx.config.engine === 'VectorEngine') {
     (__VLS_ctx.keywordRerank);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 }
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "64",
+    max: "8192",
+    ...{ class: "select" },
+});
+(__VLS_ctx.maxContextTokens);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "field mt-2" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    type: "number",
+    min: "1",
+    max: "3",
+    ...{ class: "select" },
+});
+(__VLS_ctx.reasoningHops);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
     ...{ class: "panel lg:col-span-1" },
 });
@@ -1307,7 +1430,7 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
     ...{ class: "mb-3 rounded-lg border border-slate-600/60 bg-slate-900/50 p-2 text-xs text-slate-300" },
-    title: "LLM Judge: Precision/Faithfulness/InfoLoss。&#10;规则法: Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown。",
+    title: "LLM Judge: Precision/Faithfulness/InfoLoss。&#10;规则法: Recall@K、QA Accuracy/F1、Consistency、Rejection/Rejection@Unknown、Convergence Speed、Context Distraction。",
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "mb-3 flex items-center gap-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-2 text-xs text-slate-200" },
@@ -1400,6 +1523,76 @@ if (__VLS_ctx.result) {
         ...{ class: "max-h-60 overflow-auto text-xs text-slate-200" },
     });
     (__VLS_ctx.result.assemble_result.prompt);
+    if (__VLS_ctx.singleReasoningChains.length > 0) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl border border-slate-600/60 bg-slate-900/60 p-3" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({
+            ...{ class: "mb-2 text-sm font-semibold text-arena-mint" },
+        });
+        if (__VLS_ctx.singleReasoningSeeds.length > 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+                ...{ class: "mb-2 text-[11px] text-slate-400" },
+            });
+            (__VLS_ctx.singleReasoningSeeds.join(', '));
+        }
+        if (__VLS_ctx.singleReasoningChainDetails.length > 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "mb-2 overflow-auto rounded-md border border-slate-700/60 bg-slate-900/40" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.table, __VLS_intrinsicElements.table)({
+                ...{ class: "min-w-full text-[11px] text-slate-200" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.thead, __VLS_intrinsicElements.thead)({
+                ...{ class: "bg-slate-800/70 text-slate-300" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.tr, __VLS_intrinsicElements.tr)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.th, __VLS_intrinsicElements.th)({
+                ...{ class: "px-2 py-1 text-left" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.th, __VLS_intrinsicElements.th)({
+                ...{ class: "px-2 py-1 text-left" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.th, __VLS_intrinsicElements.th)({
+                ...{ class: "px-2 py-1 text-left" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.th, __VLS_intrinsicElements.th)({
+                ...{ class: "px-2 py-1 text-left" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.tbody, __VLS_intrinsicElements.tbody)({});
+            for (const [d, idx] of __VLS_getVForSourceType((__VLS_ctx.singleReasoningChainDetails))) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.tr, __VLS_intrinsicElements.tr)({
+                    key: (`detail-${idx}-${d.chain}`),
+                    ...{ class: "border-t border-slate-800/60" },
+                });
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.td, __VLS_intrinsicElements.td)({
+                    ...{ class: "px-2 py-1" },
+                });
+                (d.priority.toFixed(3));
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.td, __VLS_intrinsicElements.td)({
+                    ...{ class: "px-2 py-1" },
+                });
+                (d.hop);
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.td, __VLS_intrinsicElements.td)({
+                    ...{ class: "px-2 py-1" },
+                });
+                (d.seed_touch ? 'Y' : 'N');
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.td, __VLS_intrinsicElements.td)({
+                    ...{ class: "px-2 py-1" },
+                });
+                ((d.lexical_overlap * 100).toFixed(1));
+            }
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "max-h-40 list-disc space-y-1 overflow-auto pl-5 text-xs text-slate-200" },
+        });
+        for (const [chain, idx] of __VLS_getVForSourceType((__VLS_ctx.singleReasoningChains))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`${idx}-${chain}`),
+            });
+            (chain);
+        }
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "rounded-xl border border-slate-600/60 bg-slate-900/60 p-3" },
     });
@@ -1645,6 +1838,21 @@ else {
 /** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['lg:col-span-1']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
@@ -1892,6 +2100,58 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-md']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-700/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['min-w-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-800/70']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-left']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-left']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-left']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-left']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-t']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-800/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-40']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
@@ -2083,6 +2343,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             collectionName: collectionName,
             similarityStrategy: similarityStrategy,
             keywordRerank: keywordRerank,
+            maxContextTokens: maxContextTokens,
+            reasoningHops: reasoningHops,
             builtinDatasets: builtinDatasets,
             selectedDatasetName: selectedDatasetName,
             datasetSampleSize: datasetSampleSize,
@@ -2114,6 +2376,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             copyBatchDiagnostic: copyBatchDiagnostic,
             runningDurationLabel: runningDurationLabel,
             finishedDurationLabel: finishedDurationLabel,
+            singleReasoningChains: singleReasoningChains,
+            singleReasoningSeeds: singleReasoningSeeds,
+            singleReasoningChainDetails: singleReasoningChainDetails,
             singleDerivedRows: singleDerivedRows,
             batchDerivedRows: batchDerivedRows,
             singleSafetySignals: singleSafetySignals,

@@ -24,12 +24,19 @@ class AssemblerType(str, Enum):
     system_injector = "SystemInjector"
     xml_tagging = "XMLTagging"
     timeline_rollover = "TimelineRollover"
+    reverse_timeline = "ReverseTimeline"
+    ranked_pruning = "RankedPruning"
+    reasoning_chain = "ReasoningChain"
 
 
 class ReflectorType(str, Enum):
     none = "None"
     generative_reflection = "GenerativeReflection"
     conflict_resolver = "ConflictResolver"
+    consolidator = "Consolidator"
+    decay_filter = "DecayFilter"
+    insight_linker = "InsightLinker"
+    abstraction_reflector = "AbstractionReflector"
 
 
 class ProviderType(str, Enum):
@@ -110,6 +117,7 @@ class AssembleRequest(BaseModel):
     user_query: str
     memory_hits: list[MemoryHit]
     system_prompt: str = "你是一个可靠的 AI 助手。"
+    token_budget: int | None = None
 
 
 class AssembleResult(BaseModel):
@@ -128,6 +136,7 @@ class ReflectRequest(BaseModel):
 class ReflectResult(BaseModel):
     reflector: ReflectorType
     insights: list[str] = Field(default_factory=list)
+    stats: dict[str, Any] = Field(default_factory=dict)
 
 
 # 评估协议
@@ -154,6 +163,8 @@ class EvalMetrics(BaseModel):
     consistency_score: float | None = None
     rejection_rate: float | None = None
     rejection_correctness_unknown: float | None = None
+    convergence_speed: float | None = None
+    context_distraction: float | None = None
 
 
 class EvalResult(BaseModel):
@@ -186,6 +197,8 @@ class RetrievalConfig(BaseModel):
     collection_name: str = Field(default="memarena_memory")
     similarity_strategy: str = Field(default="inverse_distance")
     keyword_rerank: bool = False
+    max_context_tokens: int | None = Field(default=None, ge=64, le=8192)
+    reasoning_hops: int = Field(default=1, ge=1, le=3)
 
 
 class BenchmarkRunRequest(BaseModel):

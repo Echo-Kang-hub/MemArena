@@ -15,6 +15,7 @@ from app.factories.model_factory import ProviderFactory
 from app.implementations.evaluation.llm_judge_bench import LLMJudgeBench
 from app.models.contracts import (
     AssembleRequest,
+    AssemblerType,
     BenchmarkRunRequest,
     BenchmarkRunResponse,
     BatchBenchmarkRunRequest,
@@ -31,6 +32,7 @@ from app.models.contracts import (
     ProcessorType,
     RawConversationInput,
     ReflectRequest,
+    ReflectorType,
 )
 from app.services.request_audit import (
     query_audit_events,
@@ -93,8 +95,8 @@ def options() -> dict:
             "spacy_llm_attribute",
         ],
         "engines": ["VectorEngine", "GraphEngine", "RelationalEngine"],
-        "assemblers": ["SystemInjector", "XMLTagging", "TimelineRollover"],
-        "reflectors": ["None", "GenerativeReflection", "ConflictResolver"],
+        "assemblers": [item.value for item in AssemblerType],
+        "reflectors": [item.value for item in ReflectorType],
         "providers": ["api", "ollama", "local"],
         "compute_devices": ["cpu", "cuda"],
         "max_concurrency_limit": 32,
@@ -194,22 +196,38 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         processor_output = processor.process(raw_input)
         save_result = engine.save(EngineSaveRequest(source=processor_output.source, chunks=processor_output.chunks))
 
-        search_result = engine.search(
-            EngineSearchRequest(
-                session_id=payload.session_id,
-                query=payload.input_text,
-                top_k=retrieval_cfg.top_k,
-                filters={
-                    "min_relevance": retrieval_cfg.min_relevance,
-                    "collection_name": retrieval_cfg.collection_name,
-                    "similarity_strategy": retrieval_cfg.similarity_strategy,
-                    "keyword_rerank": retrieval_cfg.keyword_rerank,
-                },
-            )
+        search_request = EngineSearchRequest(
+            session_id=payload.session_id,
+            query=payload.input_text,
+            top_k=retrieval_cfg.top_k,
+            filters={
+                "min_relevance": retrieval_cfg.min_relevance,
+                "collection_name": retrieval_cfg.collection_name,
+                "similarity_strategy": retrieval_cfg.similarity_strategy,
+                "keyword_rerank": retrieval_cfg.keyword_rerank,
+            },
         )
 
+        if (
+            payload.config.assembler == AssemblerType.reasoning_chain
+            and payload.config.engine == EngineType.graph_engine
+            and hasattr(engine, "search_with_reasoning")
+        ):
+            reasoning_hops = int(retrieval_cfg.reasoning_hops)
+            search_result = engine.search_with_reasoning(
+                search_request,
+                hops=reasoning_hops,
+                max_chains=settings.graph_reasoning_max_chains,
+            )
+        else:
+            search_result = engine.search(search_request)
+
         assemble_result = assembler.assemble(
-            AssembleRequest(user_query=payload.input_text, memory_hits=search_result.hits)
+            AssembleRequest(
+                user_query=payload.input_text,
+                memory_hits=search_result.hits,
+                token_budget=retrieval_cfg.max_context_tokens or settings.context_token_budget,
+            )
         )
 
         # 显式执行一次聊天模型生成，确保 chat LLM 与 judge LLM 真实解耦并可观测。
@@ -303,6 +321,8 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
     avg_consistency_score = avg_optional_metric("consistency_score")
     avg_rejection_rate = avg_optional_metric("rejection_rate")
     avg_rejection_correctness_unknown = avg_optional_metric("rejection_correctness_unknown")
+    avg_convergence_speed = avg_optional_metric("convergence_speed")
+    avg_context_distraction = avg_optional_metric("context_distraction")
 
     unknown_count = sum(
         1 for r in case_results if r.eval_result.metrics.rejection_correctness_unknown is not None
@@ -331,6 +351,8 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         consistency_score=avg_consistency_score,
         rejection_rate=avg_rejection_rate,
         rejection_correctness_unknown=avg_rejection_correctness_unknown,
+        convergence_speed=avg_convergence_speed,
+        context_distraction=avg_context_distraction,
     )
 
     output = io.StringIO()
@@ -346,6 +368,8 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         "consistency_score",
         "rejection_rate",
         "rejection_correctness_unknown",
+        "convergence_speed",
+        "context_distraction",
         "judge_rationale",
     ])
     for idx, item in enumerate(case_results, start=1):
@@ -361,6 +385,8 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
                 "" if item.eval_result.metrics.consistency_score is None else f"{item.eval_result.metrics.consistency_score:.4f}",
                 "" if item.eval_result.metrics.rejection_rate is None else f"{item.eval_result.metrics.rejection_rate:.4f}",
                 "" if item.eval_result.metrics.rejection_correctness_unknown is None else f"{item.eval_result.metrics.rejection_correctness_unknown:.4f}",
+                "" if item.eval_result.metrics.convergence_speed is None else f"{item.eval_result.metrics.convergence_speed:.4f}",
+                "" if item.eval_result.metrics.context_distraction is None else f"{item.eval_result.metrics.context_distraction:.4f}",
                 item.eval_result.judge_rationale,
             ]
         )
@@ -375,6 +401,8 @@ def _build_batch_response(run_id: str, case_results: list[BenchmarkRunResponse])
         "" if avg_consistency_score is None else f"{avg_consistency_score:.4f}",
         "" if avg_rejection_rate is None else f"{avg_rejection_rate:.4f}",
         "" if avg_rejection_correctness_unknown is None else f"{avg_rejection_correctness_unknown:.4f}",
+        "" if avg_convergence_speed is None else f"{avg_convergence_speed:.4f}",
+        "" if avg_context_distraction is None else f"{avg_context_distraction:.4f}",
         "",
     ])
     writer.writerow([])

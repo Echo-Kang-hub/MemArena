@@ -12,6 +12,7 @@ const props = defineProps<{
     consistency_score?: number | null;
     rejection_rate?: number | null;
     rejection_correctness_unknown?: number | null;
+    context_distraction?: number | null;
   };
 }>();
 
@@ -40,6 +41,9 @@ const rows = computed(() => {
   }
   if (props.metrics.rejection_correctness_unknown != null) {
     base.push({ label: 'Rejection@Unknown', value: props.metrics.rejection_correctness_unknown, color: 'bg-lime-400' });
+  }
+  if (props.metrics.context_distraction != null) {
+    base.push({ label: 'Context Distraction', value: props.metrics.context_distraction, color: 'bg-orange-400' });
   }
   return base;
 });

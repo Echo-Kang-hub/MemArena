@@ -25,6 +25,9 @@ const rows = computed(() => {
     if (props.metrics.rejection_correctness_unknown != null) {
         base.push({ label: 'Rejection@Unknown', value: props.metrics.rejection_correctness_unknown, color: 'bg-lime-400' });
     }
+    if (props.metrics.context_distraction != null) {
+        base.push({ label: 'Context Distraction', value: props.metrics.context_distraction, color: 'bg-orange-400' });
+    }
     return base;
 });
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */

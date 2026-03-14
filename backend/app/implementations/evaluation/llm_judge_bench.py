@@ -133,6 +133,56 @@ class LLMJudgeBench(EvaluationBench):
         actual_reject = self._is_refusal(request.generated_response or "", request.expected_facts)
         return 1.0 if actual_reject else 0.0
 
+    def _compute_convergence_speed(self, request: EvalRequest) -> float | None:
+        # Convergence Speed: 检测“更正语句”后，估计错误事实被洗掉所需反思周期（越小越快）。
+        prompt = (request.assembled_prompt or "").lower()
+        correction_cues = ["更正", "纠正", "说错", "不是", "应为", "改成", "改为", "其实"]
+        has_correction = any(cue in prompt for cue in correction_cues)
+        if not has_correction:
+            return None
+
+        # 简化冲突估计：同一 entity+attribute 出现多个 value 视为冲突一组。
+        conflict_groups = 0
+        slots: dict[str, set[str]] = {}
+        for hit in request.retrieved:
+            attrs = (hit.metadata or {}).get("attributes", [])
+            if not isinstance(attrs, list):
+                continue
+            for item in attrs:
+                if not isinstance(item, dict):
+                    continue
+                entity = str(item.get("entity", "")).strip().lower()
+                attr = str(item.get("attribute", "")).strip().lower()
+                value = str(item.get("value", "")).strip().lower()
+                if not (entity and attr and value):
+                    continue
+                key = f"{entity}::{attr}"
+                slots.setdefault(key, set()).add(value)
+        for values in slots.values():
+            if len(values) > 1:
+                conflict_groups += 1
+
+        if conflict_groups == 0:
+            return 1.0
+        return float(min(6, 1 + conflict_groups))
+
+    def _compute_context_distraction(self, request: EvalRequest) -> float | None:
+        expected = self._normalize_facts(request.expected_facts)
+        if not expected:
+            return None
+
+        if not request.retrieved:
+            return 1.0
+
+        relevant = 0
+        for hit in request.retrieved:
+            content = (hit.content or "").lower()
+            if any(fact in content for fact in expected):
+                relevant += 1
+
+        relevant_ratio = relevant / max(len(request.retrieved), 1)
+        return self._clamp01(1.0 - relevant_ratio)
+
     def _fallback_eval(self, request: EvalRequest) -> EvalResult:
         # 当外部模型不可用时，自动回退到规则评估，保障流程稳定
         retrieved_text = "\n".join([hit.content for hit in request.retrieved]).lower()
@@ -143,6 +193,8 @@ class LLMJudgeBench(EvaluationBench):
         consistency_score = self._compute_consistency_score(request)
         rejection_rate = self._compute_rejection_rate(request)
         rejection_correctness_unknown = self._compute_rejection_correctness_unknown(request)
+        convergence_speed = self._compute_convergence_speed(request)
+        context_distraction = self._compute_context_distraction(request)
 
         if expected:
             matched = sum(1 for fact in expected if fact in retrieved_text)
@@ -165,6 +217,8 @@ class LLMJudgeBench(EvaluationBench):
                 consistency_score=consistency_score,
                 rejection_rate=rejection_rate,
                 rejection_correctness_unknown=rejection_correctness_unknown,
+                convergence_speed=convergence_speed,
+                context_distraction=context_distraction,
             ),
             judge_rationale=(
                 "Fallback rule-based judge: provider unavailable or output not parseable. "
@@ -200,6 +254,8 @@ class LLMJudgeBench(EvaluationBench):
         consistency_score = self._compute_consistency_score(request)
         rejection_rate = self._compute_rejection_rate(request)
         rejection_correctness_unknown = self._compute_rejection_correctness_unknown(request)
+        convergence_speed = self._compute_convergence_speed(request)
+        context_distraction = self._compute_context_distraction(request)
 
         raw = self.llm_client.generate(
             judge_prompt,
@@ -232,6 +288,8 @@ class LLMJudgeBench(EvaluationBench):
                 consistency_score=consistency_score,
                 rejection_rate=rejection_rate,
                 rejection_correctness_unknown=rejection_correctness_unknown,
+                convergence_speed=convergence_speed,
+                context_distraction=context_distraction,
             ),
             judge_rationale=rationale,
             raw_judge_output=raw,

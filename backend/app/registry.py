@@ -4,6 +4,9 @@ from typing import Any
 
 from app.core.interfaces import ContextAssembler, MemoryEngine, MemoryProcessor, MemoryReflector
 from app.implementations.assemblers.basic_assemblers import (
+    RankedPruningAssembler,
+    ReasoningChainAssembler,
+    ReverseTimelineAssembler,
     SystemInjectorAssembler,
     TimelineRolloverAssembler,
     XMLTaggingAssembler,
@@ -14,7 +17,14 @@ from app.implementations.processors.basic_processors import (
     RawLoggerProcessor,
     SummarizerProcessor,
 )
-from app.implementations.reflectors.basic_reflectors import ConflictResolverReflector, GenerativeReflectionReflector
+from app.implementations.reflectors.basic_reflectors import (
+    AbstractionReflector,
+    ConflictResolverReflector,
+    ConsolidatorReflector,
+    DecayFilterReflector,
+    GenerativeReflectionReflector,
+    InsightLinkerReflector,
+)
 from app.models.contracts import AssemblerType, EngineType, ProcessorType, ReflectorType
 from app.models.contracts import EntityExtractorMethod, SummarizerMethod
 
@@ -47,6 +57,9 @@ def build_assembler(kind: AssemblerType) -> ContextAssembler:
         AssemblerType.system_injector: SystemInjectorAssembler(),
         AssemblerType.xml_tagging: XMLTaggingAssembler(),
         AssemblerType.timeline_rollover: TimelineRolloverAssembler(),
+        AssemblerType.reverse_timeline: ReverseTimelineAssembler(),
+        AssemblerType.ranked_pruning: RankedPruningAssembler(),
+        AssemblerType.reasoning_chain: ReasoningChainAssembler(),
     }
     return mapping[kind]
 
@@ -57,5 +70,9 @@ def build_reflector(kind: ReflectorType) -> MemoryReflector | None:
     mapping: dict[ReflectorType, MemoryReflector] = {
         ReflectorType.generative_reflection: GenerativeReflectionReflector(),
         ReflectorType.conflict_resolver: ConflictResolverReflector(),
+        ReflectorType.consolidator: ConsolidatorReflector(),
+        ReflectorType.decay_filter: DecayFilterReflector(),
+        ReflectorType.insight_linker: InsightLinkerReflector(),
+        ReflectorType.abstraction_reflector: AbstractionReflector(),
     }
     return mapping[kind]
