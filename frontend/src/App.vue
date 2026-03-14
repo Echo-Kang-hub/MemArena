@@ -63,6 +63,8 @@ const reflectorWritebackMinConfidence = ref(0.75);
 const reflectorLlmMode = ref<ReflectorLLMMode>('LLMWithFallback');
 const datasetCases = ref<Array<{ case_id: string; input_text: string; expected_facts: string[]; session_id: string }>>([]);
 const builtinDatasets = ref<DatasetSummary[]>([]);
+const builtinDatasetsLoading = ref(false);
+const builtinDatasetsMessage = ref('');
 const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
@@ -1261,15 +1263,25 @@ onBeforeUnmount(() => {
   stopRunTimer();
 });
 
-async function loadBuiltinDatasets() {
+async function loadBuiltinDatasets(showMessage = false) {
+  builtinDatasetsLoading.value = true;
+  if (showMessage) {
+    builtinDatasetsMessage.value = '';
+  }
   try {
     builtinDatasets.value = await listDatasets();
     if (!selectedDatasetName.value && builtinDatasets.value.length > 0) {
       selectedDatasetName.value = builtinDatasets.value[0].name;
-      datasetSampleSize.value = Math.min(5, builtinDatasets.value[0].count || 5);
+      const count = Number(builtinDatasets.value[0].count ?? 0);
+      datasetSampleSize.value = count > 0 ? Math.min(5, count) : 5;
+    }
+    if (showMessage) {
+      builtinDatasetsMessage.value = `已刷新 ${builtinDatasets.value.length} 个数据集。`;
     }
   } catch {
-    // 后端不可用时不阻断页面
+    builtinDatasetsMessage.value = '刷新失败，请检查后端服务。';
+  } finally {
+    builtinDatasetsLoading.value = false;
   }
 }
 
@@ -1975,12 +1987,22 @@ function downloadCsvReport() {
           </p>
 
           <div class="rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
-            <p class="mb-2 text-xs font-semibold text-arena-mint">内置数据集</p>
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <p class="text-xs font-semibold text-arena-mint">内置数据集</p>
+              <button
+                class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100 transition hover:border-slate-300"
+                :disabled="builtinDatasetsLoading"
+                @click="loadBuiltinDatasets(true)"
+              >
+                {{ builtinDatasetsLoading ? '刷新中...' : '刷新数据集列表' }}
+              </button>
+            </div>
+            <p v-if="builtinDatasetsMessage" class="mb-2 text-[11px] text-slate-300">{{ builtinDatasetsMessage }}</p>
             <label class="field">
               <span>Dataset</span>
-              <select v-model="selectedDatasetName" class="select">
+              <select v-model="selectedDatasetName" class="select" :disabled="builtinDatasetsLoading">
                 <option v-for="d in builtinDatasets" :key="d.name" :value="d.name">
-                  {{ d.name }} ({{ d.count }})
+                  {{ d.name }} ({{ d.count >= 0 ? d.count : '?' }})
                 </option>
               </select>
             </label>

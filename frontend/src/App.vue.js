@@ -41,6 +41,8 @@ const reflectorWritebackMinConfidence = ref(0.75);
 const reflectorLlmMode = ref('LLMWithFallback');
 const datasetCases = ref([]);
 const builtinDatasets = ref([]);
+const builtinDatasetsLoading = ref(false);
+const builtinDatasetsMessage = ref('');
 const selectedDatasetName = ref('');
 const datasetSampleSize = ref(5);
 const datasetStartIndex = ref(0);
@@ -1132,16 +1134,27 @@ function downloadMarkdownReport() {
 onBeforeUnmount(() => {
     stopRunTimer();
 });
-async function loadBuiltinDatasets() {
+async function loadBuiltinDatasets(showMessage = false) {
+    builtinDatasetsLoading.value = true;
+    if (showMessage) {
+        builtinDatasetsMessage.value = '';
+    }
     try {
         builtinDatasets.value = await listDatasets();
         if (!selectedDatasetName.value && builtinDatasets.value.length > 0) {
             selectedDatasetName.value = builtinDatasets.value[0].name;
-            datasetSampleSize.value = Math.min(5, builtinDatasets.value[0].count || 5);
+            const count = Number(builtinDatasets.value[0].count ?? 0);
+            datasetSampleSize.value = count > 0 ? Math.min(5, count) : 5;
+        }
+        if (showMessage) {
+            builtinDatasetsMessage.value = `已刷新 ${builtinDatasets.value.length} 个数据集。`;
         }
     }
     catch {
-        // 后端不可用时不阻断页面
+        builtinDatasetsMessage.value = '刷新失败，请检查后端服务。';
+    }
+    finally {
+        builtinDatasetsLoading.value = false;
     }
 }
 loadBuiltinDatasets();
@@ -2577,9 +2590,26 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)(
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "rounded-lg border border-slate-600/60 bg-slate-900/40 p-3" },
 });
-__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-    ...{ class: "mb-2 text-xs font-semibold text-arena-mint" },
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mb-2 flex items-center justify-between gap-2" },
 });
+__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+    ...{ class: "text-xs font-semibold text-arena-mint" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.loadBuiltinDatasets(true);
+        } },
+    ...{ class: "rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100 transition hover:border-slate-300" },
+    disabled: (__VLS_ctx.builtinDatasetsLoading),
+});
+(__VLS_ctx.builtinDatasetsLoading ? '刷新中...' : '刷新数据集列表');
+if (__VLS_ctx.builtinDatasetsMessage) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "mb-2 text-[11px] text-slate-300" },
+    });
+    (__VLS_ctx.builtinDatasetsMessage);
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "field" },
 });
@@ -2587,6 +2617,7 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.
 __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
     value: (__VLS_ctx.selectedDatasetName),
     ...{ class: "select" },
+    disabled: (__VLS_ctx.builtinDatasetsLoading),
 });
 for (const [d] of __VLS_getVForSourceType((__VLS_ctx.builtinDatasets))) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
@@ -2594,7 +2625,7 @@ for (const [d] of __VLS_getVForSourceType((__VLS_ctx.builtinDatasets))) {
         value: (d.name),
     });
     (d.name);
-    (d.count);
+    (d.count >= 0 ? d.count : '?');
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "mt-2 grid grid-cols-2 gap-2" },
@@ -3875,9 +3906,26 @@ else {
 /** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
 /** @type {__VLS_StyleScopedClasses['p-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-500/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:border-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
@@ -4527,6 +4575,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             reflectorWritebackMinConfidence: reflectorWritebackMinConfidence,
             reflectorLlmMode: reflectorLlmMode,
             builtinDatasets: builtinDatasets,
+            builtinDatasetsLoading: builtinDatasetsLoading,
+            builtinDatasetsMessage: builtinDatasetsMessage,
             selectedDatasetName: selectedDatasetName,
             datasetSampleSize: datasetSampleSize,
             datasetStartIndex: datasetStartIndex,
@@ -4587,6 +4637,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             singlePromptQualityChecks: singlePromptQualityChecks,
             renderedMarkdownReport: renderedMarkdownReport,
             downloadMarkdownReport: downloadMarkdownReport,
+            loadBuiltinDatasets: loadBuiltinDatasets,
             loadGlobalModelConfigPanel: loadGlobalModelConfigPanel,
             saveGlobalModelConfigPanel: saveGlobalModelConfigPanel,
             runGlobalConnectivityTest: runGlobalConnectivityTest,

@@ -12,18 +12,32 @@ def dataset_root() -> Path:
     return Path(__file__).resolve().parents[2] / "datasets"
 
 
+# Avoid loading very large files fully when only listing dataset options.
+LIST_COUNT_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _safe_dataset_count(path: Path) -> int:
+    try:
+        if path.stat().st_size > LIST_COUNT_MAX_BYTES:
+            return -1
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return len(data)
+        return 0
+    except Exception:
+        return -1
+
+
 def list_datasets() -> list[dict[str, Any]]:
     root = dataset_root()
     root.mkdir(parents=True, exist_ok=True)
 
     datasets: list[dict[str, Any]] = []
-    for p in sorted(root.glob("*.json")):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            count = len(data) if isinstance(data, list) else 0
-            datasets.append({"name": p.stem, "file": p.name, "count": count})
-        except Exception:
-            datasets.append({"name": p.stem, "file": p.name, "count": 0})
+    json_files = sorted(root.glob("*.json"))
+    jsonl_files = sorted(root.glob("*.jsonl"))
+    for p in [*json_files, *jsonl_files]:
+        count = _safe_dataset_count(p) if p.suffix.lower() == ".json" else -1
+        datasets.append({"name": p.stem, "file": p.name, "count": count})
     return datasets
 
 

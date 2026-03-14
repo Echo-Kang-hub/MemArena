@@ -45,3 +45,7 @@ volumes/
 *.db
 *.sqlite
 *.sqlite3
+
+backend/datasets/longmemeval_m_cleaned.json
+backend/datasets/longmemeval_s_cleaned.json
+backend/datasets/longmemeval_oracle.json
