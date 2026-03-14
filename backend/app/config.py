@@ -82,6 +82,20 @@ class Settings(BaseSettings):
     local_llm_model_path: str = ""
     local_embed_model_path: str = ""
 
+    graph_relevance_lexical_weight: float = 0.45
+    graph_relevance_entity_weight: float = 0.35
+    graph_relevance_completeness_weight: float = 0.20
+    graph_relevance_hint_weight: float = 0.10
+    graph_relevance_fallback_lexical_weight: float = 0.90
+    graph_relevance_fallback_hint_weight: float = 0.10
+
+    relational_relevance_lexical_weight: float = 0.45
+    relational_relevance_entity_weight: float = 0.35
+    relational_relevance_completeness_weight: float = 0.20
+    relational_relevance_hint_weight: float = 0.10
+    relational_relevance_fallback_lexical_weight: float = 0.90
+    relational_relevance_fallback_hint_weight: float = 0.10
+
     sqlite_path: str = str(DEFAULT_DATA_DIR / "memarena.db")
     chroma_persist_dir: str = str(DEFAULT_DATA_DIR / "chroma")
     chroma_collection_name: str = "memarena_memory"

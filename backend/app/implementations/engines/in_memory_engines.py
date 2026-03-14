@@ -19,9 +19,165 @@ class _BaseInMemoryEngine(MemoryEngine):
         self.engine_type = engine_type
         self._store: dict[str, list[tuple[str, str, dict]]] = defaultdict(list)
 
+    def _tokenize(self, text: str) -> set[str]:
+        compact = text.strip().lower()
+        if not compact:
+            return set()
+        if " " in compact:
+            return set([part for part in re.split(r"\s+", compact) if part])
+        # 中文等无空格文本时，按字符 token 粗粒度切分
+        return set([ch for ch in compact if ch.strip()])
+
+    def _extract_query_entities(self, query: str) -> set[str]:
+        # 抽取英文实体样式与中文词块，作为结构化对齐的 query 线索。
+        caps = set(token.strip(" ,.?!:;()[]{}\"'") for token in query.split() if token[:1].isupper())
+        cjk_chunks = set(re.findall(r"[\u4e00-\u9fff]{2,}", query))
+        return set([x.lower() for x in [*caps, *cjk_chunks] if x])
+
+    def _score_lexical(self, query: str, content: str) -> float:
+        query_terms = self._tokenize(query)
+        if not query_terms:
+            return 0.0
+        terms = self._tokenize(content)
+        overlap = len(query_terms.intersection(terms))
+        return overlap / max(len(query_terms), 1)
+
+    def _score_triples(self, query: str, metadata: dict[str, Any]) -> float:
+        triples = metadata.get("triples", [])
+        if not isinstance(triples, list) or not triples:
+            return 0.0
+
+        valid = []
+        for item in triples:
+            if not isinstance(item, dict):
+                continue
+            s = str(item.get("subject", "")).strip()
+            p = str(item.get("predicate", "")).strip()
+            o = str(item.get("object", "")).strip()
+            if s and p and o:
+                valid.append((s, p, o))
+
+        if not valid:
+            return 0.0
+
+        query_terms = self._tokenize(query)
+        query_entities = self._extract_query_entities(query)
+
+        triple_term_tokens = set()
+        triple_entities = set()
+        for s, p, o in valid:
+            triple_term_tokens.update(self._tokenize(s))
+            triple_term_tokens.update(self._tokenize(p))
+            triple_term_tokens.update(self._tokenize(o))
+            triple_entities.add(s.lower())
+            triple_entities.add(o.lower())
+
+        lexical = len(query_terms.intersection(triple_term_tokens)) / max(len(query_terms), 1)
+        entity_alignment = 0.0
+        if query_entities:
+            entity_alignment = len(query_entities.intersection(triple_entities)) / len(query_entities)
+
+        # 结构完整性：有效三元组占比
+        completeness = len(valid) / max(len(triples), 1)
+        return self._combine_structural_components(lexical, entity_alignment, completeness)
+
+    def _score_attributes(self, query: str, metadata: dict[str, Any]) -> float:
+        attrs = metadata.get("attributes", [])
+        if not isinstance(attrs, list) or not attrs:
+            return 0.0
+
+        valid = []
+        for item in attrs:
+            if not isinstance(item, dict):
+                continue
+            e = str(item.get("entity", "")).strip()
+            a = str(item.get("attribute", "")).strip()
+            v = str(item.get("value", "")).strip()
+            if e and a and v:
+                valid.append((e, a, v))
+
+        if not valid:
+            return 0.0
+
+        query_terms = self._tokenize(query)
+        query_entities = self._extract_query_entities(query)
+
+        attr_tokens = set()
+        attr_entities = set()
+        for e, a, v in valid:
+            attr_tokens.update(self._tokenize(e))
+            attr_tokens.update(self._tokenize(a))
+            attr_tokens.update(self._tokenize(v))
+            attr_entities.add(e.lower())
+
+        lexical = len(query_terms.intersection(attr_tokens)) / max(len(query_terms), 1)
+        entity_alignment = 0.0
+        if query_entities:
+            entity_alignment = len(query_entities.intersection(attr_entities)) / len(query_entities)
+
+        completeness = len(valid) / max(len(attrs), 1)
+        return self._combine_structural_components(lexical, entity_alignment, completeness)
+
+    def _normalize_weights(self, *weights: float) -> list[float]:
+        clipped = [max(0.0, float(w)) for w in weights]
+        total = sum(clipped)
+        if total <= 0:
+            return [1.0 / len(clipped)] * len(clipped)
+        return [w / total for w in clipped]
+
+    def _combine_structural_components(self, lexical: float, entity_alignment: float, completeness: float) -> float:
+        if self.engine_type == EngineType.graph_engine:
+            lw, ew, cw = self._normalize_weights(
+                settings.graph_relevance_lexical_weight,
+                settings.graph_relevance_entity_weight,
+                settings.graph_relevance_completeness_weight,
+            )
+        elif self.engine_type == EngineType.relational_engine:
+            lw, ew, cw = self._normalize_weights(
+                settings.relational_relevance_lexical_weight,
+                settings.relational_relevance_entity_weight,
+                settings.relational_relevance_completeness_weight,
+            )
+        else:
+            lw, ew, cw = self._normalize_weights(0.45, 0.35, 0.20)
+        return lw * lexical + ew * entity_alignment + cw * completeness
+
+    def _combine_final_relevance(self, lexical: float, structural: float, score_hint: float) -> float:
+        if structural > 0:
+            if self.engine_type == EngineType.graph_engine:
+                sw, hw = self._normalize_weights(1.0, settings.graph_relevance_hint_weight)
+            elif self.engine_type == EngineType.relational_engine:
+                sw, hw = self._normalize_weights(1.0, settings.relational_relevance_hint_weight)
+            else:
+                sw, hw = self._normalize_weights(0.9, 0.1)
+            return sw * structural + hw * score_hint
+
+        if self.engine_type == EngineType.graph_engine:
+            lw, hw = self._normalize_weights(
+                settings.graph_relevance_fallback_lexical_weight,
+                settings.graph_relevance_fallback_hint_weight,
+            )
+        elif self.engine_type == EngineType.relational_engine:
+            lw, hw = self._normalize_weights(
+                settings.relational_relevance_fallback_lexical_weight,
+                settings.relational_relevance_fallback_hint_weight,
+            )
+        else:
+            lw, hw = self._normalize_weights(0.9, 0.1)
+        return lw * lexical + hw * score_hint
+
+    def _score_structural(self, query: str, metadata: dict[str, Any]) -> float:
+        if "triples" in metadata:
+            return self._score_triples(query, metadata)
+        if "attributes" in metadata:
+            return self._score_attributes(query, metadata)
+        return 0.0
+
     def save(self, request: EngineSaveRequest) -> EngineSaveResult:
         for chunk in request.chunks:
-            self._store[chunk.session_id].append((chunk.chunk_id, chunk.content, chunk.metadata))
+            enriched_meta = dict(chunk.metadata)
+            enriched_meta["_score_hint"] = float(chunk.score_hint)
+            self._store[chunk.session_id].append((chunk.chunk_id, chunk.content, enriched_meta))
         return EngineSaveResult(
             engine=self.engine_type,
             saved_count=len(request.chunks),
@@ -30,14 +186,16 @@ class _BaseInMemoryEngine(MemoryEngine):
 
     def search(self, request: EngineSearchRequest) -> EngineSearchResult:
         candidates = self._store.get(request.session_id, [])
-        query_terms = set(request.query.lower().split())
-
-        # 演示检索分数：按 query 词命中数排序
+        # 结构化评分：词匹配 + 三元组/属性质量 + score_hint 融合（权重可配置）
         scored: list[MemoryHit] = []
         for chunk_id, content, metadata in candidates:
-            terms = set(content.lower().split())
-            overlap = len(query_terms.intersection(terms))
-            relevance = overlap / max(len(query_terms), 1)
+            lexical = self._score_lexical(request.query, content)
+            structural = self._score_structural(request.query, metadata)
+            score_hint = max(0.0, min(1.0, float(metadata.get("_score_hint", 1.0))))
+
+            relevance = self._combine_final_relevance(lexical, structural, score_hint)
+
+            relevance = max(0.0, min(1.0, relevance))
             scored.append(MemoryHit(chunk_id=chunk_id, content=content, relevance=relevance, metadata=metadata))
 
         scored.sort(key=lambda x: x.relevance, reverse=True)

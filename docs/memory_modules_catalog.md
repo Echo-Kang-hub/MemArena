@@ -46,11 +46,27 @@
 - 定义：图结构记忆引擎（当前为内存占位实现）。
 - 适用：关系推理、路径查询。
 - 推荐搭配：`EntityExtractor` 的 `llm_triple` / `spacy_llm_triple`。
+- 检索相关度（结构化评分）：
+	- 评分维度：lexical（词项重叠）、entity（查询实体命中）、completeness（三元组字段完整性）、hint（写入时 score_hint）。
+	- 默认权重：lexical=0.25, entity=0.40, completeness=0.30, hint=0.05。
+	- 调参变量：`GRAPH_RELEVANCE_LEXICAL_WEIGHT`、`GRAPH_RELEVANCE_ENTITY_WEIGHT`、`GRAPH_RELEVANCE_COMPLETENESS_WEIGHT`、`GRAPH_RELEVANCE_HINT_WEIGHT`、`GRAPH_RELEVANCE_FALLBACK_LEXICAL_WEIGHT`、`GRAPH_RELEVANCE_FALLBACK_HINT_WEIGHT`。
+	- 说明：后端会自动归一化权重；fallback 用于结构化字段缺失时回退到词法相关度。
 
 ### RelationalEngine
 - 定义：关系型记忆引擎（当前为内存占位实现）。
 - 适用：结构化筛选、规则检索。
 - 推荐搭配：`EntityExtractor` 的 `llm_attribute` / `spacy_llm_attribute`。
+- 检索相关度（结构化评分）：
+	- 评分维度：lexical（词项重叠）、entity（主体/属性与查询命中）、completeness（属性键值完整性）、hint（写入时 score_hint）。
+	- 默认权重：lexical=0.30, entity=0.35, completeness=0.25, hint=0.10。
+	- 调参变量：`RELATIONAL_RELEVANCE_LEXICAL_WEIGHT`、`RELATIONAL_RELEVANCE_ENTITY_WEIGHT`、`RELATIONAL_RELEVANCE_COMPLETENESS_WEIGHT`、`RELATIONAL_RELEVANCE_HINT_WEIGHT`、`RELATIONAL_RELEVANCE_FALLBACK_LEXICAL_WEIGHT`、`RELATIONAL_RELEVANCE_FALLBACK_HINT_WEIGHT`。
+	- 说明：后端会自动归一化权重；fallback 用于属性结构缺失时回退到词法相关度。
+
+### 结构化相关度调参建议
+- 平衡预设（默认）：保持现有默认值，适合大多数问答与卡片检索场景。
+- 精确率优先：提高 `entity` 与 `completeness`，降低 `lexical`（减少“词相近但关系错”的命中）。
+- 召回优先：提高 `lexical` 与 `fallback`（减少因抽取结构不完整导致的漏召回）。
+- 排查建议：若相关度长期接近 0，优先检查抽取结果中是否含完整 `subject/predicate/object` 或 `entity/attribute/value` 字段。
 
 ## 3. Context Assembler（上下文组装器）
 
