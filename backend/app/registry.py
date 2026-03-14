@@ -19,6 +19,7 @@ from app.implementations.processors.basic_processors import (
 )
 from app.implementations.reflectors.basic_reflectors import (
     AbstractionReflector,
+    ConflictConsolidatorReflector,
     ConflictResolverReflector,
     ConsolidatorReflector,
     DecayFilterReflector,
@@ -75,6 +76,7 @@ def build_reflector(
         ReflectorType.generative_reflection: GenerativeReflectionReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
         ReflectorType.conflict_resolver: ConflictResolverReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
         ReflectorType.consolidator: ConsolidatorReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
+        ReflectorType.conflict_consolidator: ConflictConsolidatorReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
         ReflectorType.decay_filter: DecayFilterReflector(),
         ReflectorType.insight_linker: InsightLinkerReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),
         ReflectorType.abstraction_reflector: AbstractionReflector(llm_client=reflection_llm_client, llm_mode=llm_mode),

@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     entity_ollama_model: str = ""
     entity_local_model_path: str = ""
 
+    reflector_llm_provider: str = ""
+    reflector_api_base_url: str = ""
+    reflector_api_key: str = ""
+    reflector_api_model: str = ""
+    reflector_ollama_base_url: str = ""
+    reflector_ollama_model: str = ""
+    reflector_local_model_path: str = ""
+
     embedding_provider: str = ""
     embedding_api_base_url: str = ""
     embedding_api_key: str = ""

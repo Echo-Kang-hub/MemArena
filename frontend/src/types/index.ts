@@ -32,6 +32,7 @@ export interface BenchmarkConfig {
     | 'GenerativeReflection'
     | 'ConflictResolver'
     | 'Consolidator'
+    | 'ConflictConsolidator'
     | 'DecayFilter'
     | 'InsightLinker'
     | 'AbstractionReflector';
@@ -40,6 +41,7 @@ export interface BenchmarkConfig {
   judge_llm_provider?: ProviderType;
   summarizer_llm_provider?: ProviderType;
   entity_llm_provider?: ProviderType;
+  reflector_llm_provider?: ProviderType;
   embedding_provider: ProviderType;
   summarizer_method?: SummarizerMethod;
   entity_extractor_method?: EntityExtractorMethod;
@@ -51,6 +53,7 @@ export interface BenchmarkRunRequest {
   session_id: string;
   user_id: string;
   input_text: string;
+  assistant_message?: string;
   expected_facts: string[];
   retrieval: {
     top_k: number;
@@ -101,6 +104,8 @@ export interface BenchmarkRunResponse {
       content: string;
       relevance: number;
       metadata?: {
+        role?: 'user' | 'assistant' | 'unknown';
+        stm?: boolean;
         reasoning_chains?: string[];
         reasoning_seed_entities?: string[];
         reasoning_chain_details?: Array<{

@@ -228,6 +228,21 @@ def _extract_themes(request: ReflectRequest) -> list[str]:
     return [x[0] for x in ranked[:6]]
 
 
+def _partition_hits_by_role(request: ReflectRequest) -> tuple[list[str], list[str], list[str]]:
+    user_hits: list[str] = []
+    assistant_hits: list[str] = []
+    other_hits: list[str] = []
+    for hit in request.memory_hits:
+        role = str((hit.metadata or {}).get("role", "")).strip().lower()
+        if role == "user":
+            user_hits.append(hit.content)
+        elif role == "assistant":
+            assistant_hits.append(hit.content)
+        else:
+            other_hits.append(hit.content)
+    return user_hits, assistant_hits, other_hits
+
+
 def _should_use_llm(mode: ReflectorLLMMode) -> bool:
     return mode in {ReflectorLLMMode.llm, ReflectorLLMMode.llm_with_fallback}
 
@@ -421,17 +436,28 @@ class ConsolidatorReflector(MemoryReflector):
     async def reflect(self, request: ReflectRequest) -> ReflectResult:
         similar_pairs = _estimate_redundant_pairs(request.memory_hits)
         timeline_hint = "present_vs_past" if any(k in request.latest_query for k in ["曾经", "以前", "现在", "目前"]) else "none"
+        user_hits, assistant_hits, other_hits = _partition_hits_by_role(request)
+        memory_decision: dict[str, Any] = {
+            "source": "heuristic",
+            "keep": [*user_hits[:3], *assistant_hits[:2]],
+            "update": [],
+            "drop": [],
+            "rationale": "优先保留用户事实与高相关助手结论；其余在冲突或重复时再进入裁决。",
+        }
         insights = [
             f"Consolidator 检测到 {similar_pairs} 对高相似记忆，可执行融合式更新以减少冗余。",
-            "建议策略：只做近重复内容合并、摘要压缩与来源聚合，不直接做冲突裁决。",
+            "建议策略：做近重复内容合并、摘要压缩与来源聚合，并输出候选 Memory Decision。",
         ]
 
         if _should_use_llm(self.llm_mode) and self.llm_client is not None:
             prompt = (
-                "你是去重合并反思器。请输出 JSON: {\"insights\":[\"...\"],\"merge_rules\":[\"...\"]}。\n\n"
+                "你是去重合并反思器。请输出 JSON: {\"insights\":[\"...\"],\"merge_rules\":[\"...\"],"
+                "\"memory_decision\":{\"keep\":[\"...\"],\"update\":[\"...\"],\"drop\":[\"...\"],\"rationale\":\"...\"}}。\n\n"
                 f"latest_query: {request.latest_query}\n"
                 f"similar_pairs: {similar_pairs}\n"
-                f"sample_hits: {json.dumps([h.content for h in request.memory_hits[:6]], ensure_ascii=False)}"
+                f"user_hits: {json.dumps(user_hits[:8], ensure_ascii=False)}\n"
+                f"assistant_hits: {json.dumps(assistant_hits[:8], ensure_ascii=False)}\n"
+                f"other_hits: {json.dumps(other_hits[:6], ensure_ascii=False)}"
             )
             parsed = _llm_json_or_none(self.llm_client, prompt, "reflector_consolidator")
             if isinstance(parsed, dict):
@@ -440,6 +466,15 @@ class ConsolidatorReflector(MemoryReflector):
                     cleaned = [str(x).strip() for x in llm_insights if str(x).strip()]
                     if cleaned:
                         insights = cleaned[:6]
+                llm_memory_decision = parsed.get("memory_decision", {})
+                if isinstance(llm_memory_decision, dict):
+                    memory_decision = {
+                        "source": "llm",
+                        "keep": [str(x).strip() for x in llm_memory_decision.get("keep", []) if str(x).strip()][:10],
+                        "update": [str(x).strip() for x in llm_memory_decision.get("update", []) if str(x).strip()][:10],
+                        "drop": [str(x).strip() for x in llm_memory_decision.get("drop", []) if str(x).strip()][:10],
+                        "rationale": str(llm_memory_decision.get("rationale", "")).strip(),
+                    }
 
         return ReflectResult(
             reflector=ReflectorType.consolidator,
@@ -449,8 +484,56 @@ class ConsolidatorReflector(MemoryReflector):
                 "similar_pairs": similar_pairs,
                 "timeline_hint": timeline_hint,
                 "role_boundary": "dedup_only",
+                "role_hit_counts": {
+                    "user": len(user_hits),
+                    "assistant": len(assistant_hits),
+                    "other": len(other_hits),
+                },
+                "memory_decision": memory_decision,
                 "targets": ["RelationalEngine", "GraphEngine"],
             },
+        )
+
+
+class ConflictConsolidatorReflector(MemoryReflector):
+    def __init__(
+        self,
+        llm_client: Any | None = None,
+        llm_mode: ReflectorLLMMode = ReflectorLLMMode.llm_with_fallback,
+    ) -> None:
+        self._consolidator = ConsolidatorReflector(llm_client=llm_client, llm_mode=llm_mode)
+        self._resolver = ConflictResolverReflector(llm_client=llm_client, llm_mode=llm_mode)
+        self.llm_mode = llm_mode
+
+    async def reflect(self, request: ReflectRequest) -> ReflectResult:
+        consolidator_result = await self._consolidator.reflect(request)
+        resolver_result = await self._resolver.reflect(request)
+
+        insights: list[str] = []
+        seen: set[str] = set()
+        for line in [*consolidator_result.insights, *resolver_result.insights]:
+            normalized = str(line).strip()
+            key = normalized.lower()
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            insights.append(normalized)
+
+        stats = {
+            "llm_mode": self.llm_mode.value,
+            "composition": ["Consolidator", "ConflictResolver"],
+            "memory_decision": (consolidator_result.stats or {}).get("memory_decision", {}),
+            "proposed_resolutions": (resolver_result.stats or {}).get("proposed_resolutions", []),
+            "conflict_count": int((resolver_result.stats or {}).get("conflict_count", 0) or 0),
+            "similar_pairs": int((consolidator_result.stats or {}).get("similar_pairs", 0) or 0),
+            "convergence_cycles": int((resolver_result.stats or {}).get("convergence_cycles", 0) or 0),
+            "targets": ["VectorEngine", "RelationalEngine", "GraphEngine"],
+        }
+
+        return ReflectResult(
+            reflector=ReflectorType.conflict_consolidator,
+            insights=insights[:10],
+            stats=stats,
         )
 
 

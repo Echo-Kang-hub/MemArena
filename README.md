@@ -123,6 +123,7 @@ docker compose up --build
   - `CHAT_*`：聊天链路模型。
   - `EMBEDDING_*`：向量模型链路。
   - `JUDGE_*`：LLM-as-a-Judge 模型。
+- 若使用 Reflector 的 LLM 路径，建议额外独立配置 `REFLECTOR_*`，与 Chat/Judge/Summarizer/Entity 解耦。
 - 三组可配置为不同 provider 与不同 base URL（例如 Chat 走 API 网关、Judge 走另一个评测网关）。
 - 若 `CHAT_*` / `EMBEDDING_*` / `JUDGE_*` 留空，会回退到兼容键（如 `OPENAI_*` / `OLLAMA_*` / `LOCAL_*`）。
 - 本地推理设备可用 `LOCAL_INFER_DEVICE=cpu|cuda` 设置默认值，前端也可按任务覆盖。
@@ -171,10 +172,18 @@ docker compose up --build
   - `mem0_agent_facts`
   - `mem0_dual_facts`
 - 约束：`mem0_*` 必须使用 `RelationalEngine`。
-- 说明：
-  - `mem0_user_facts` 仅从用户文本抽取事实。
-  - `mem0_agent_facts` 仅从 assistant 消息抽取事实（读取 `metadata.assistant_message`）。
-  - `mem0_dual_facts` 同时抽取两侧事实并合并。
+- 说明（修正后）：
+  - mem0 在处理阶段采用双路抽取：同一轮同时抽取用户事实和助手事实。
+  - 两路结果分别带上 `role:user` / `role:assistant` 标签入库。
+  - 检索后由 Reflector（推荐 `Consolidator`）输出 `memory_decision`（keep/update/drop）。
+
+### User/Assistant 角色记忆分离
+- 所有 Processor 产出的记忆块都带角色标记（`metadata.role` + `role:*` 标签）。
+- Engine 存储和检索会保留该角色标记。
+- Assembler 注入 prompt 时会分区：
+  - `MEMORY_USER`
+  - `MEMORY_ASSISTANT`
+  - `MEMORY_OTHER`
 
 ### Reflector LLM 模式
 - 在 `retrieval` 中新增 `reflector_llm_mode`：
@@ -185,9 +194,21 @@ docker compose up --build
   - `GenerativeReflection`
   - `ConflictResolver`
   - `Consolidator`
+  - `ConflictConsolidator`
   - `InsightLinker`
   - `AbstractionReflector`
 - 前端配置面板已提供该模式下拉选择。
+
+### Reflector 组合方案（融合 + 纠错）
+- 新增 `ConflictConsolidator`：组合 `Consolidator` 与 `ConflictResolver`。
+- 典型场景：用户声明“之前说错了，现在更正为 ...”时，同时完成记忆融合与错误纠正。
+- 适配引擎：`VectorEngine` / `GraphEngine` / `RelationalEngine`。
+- 可独立选择 Reflector 的 Provider：`config.reflector_llm_provider`，并支持 `api|ollama|local`。
+
+### Consolidator 与 ConflictResolver 的区别
+- `Consolidator`：去重/融合/压缩，输出候选记忆决策（不直接做最终冲突裁决写回）。
+- `ConflictResolver`：处理互斥事实冲突，给出裁决与可写回的 `proposed_resolutions`。
+- 两者关系：互补，不是包含关系。
 
 ### Assembler 对比汇总脚本
 - 单次跑各 Assembler 基准：

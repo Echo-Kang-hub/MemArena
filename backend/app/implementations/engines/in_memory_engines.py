@@ -242,6 +242,17 @@ class _BaseInMemoryEngine(MemoryEngine):
         for chunk in request.chunks:
             enriched_meta = dict(chunk.metadata)
             enriched_meta["_score_hint"] = float(chunk.score_hint)
+            enriched_meta["tags"] = list(chunk.tags)
+            if "role" not in enriched_meta:
+                role = "unknown"
+                for tag in chunk.tags:
+                    if str(tag).strip().lower() == "role:user":
+                        role = "user"
+                        break
+                    if str(tag).strip().lower() == "role:assistant":
+                        role = "assistant"
+                        break
+                enriched_meta["role"] = role
             self._store[chunk.session_id].append((chunk.chunk_id, chunk.content, enriched_meta))
         return EngineSaveResult(
             engine=self.engine_type,
@@ -341,11 +352,23 @@ class VectorEngine(MemoryEngine):
             ids.append(chunk.chunk_id)
             documents.append(chunk.content)
             embeddings.append(self.embedding_client.embed(chunk.content))
+            role = str((chunk.metadata or {}).get("role", "")).strip().lower()
+            if not role:
+                role = "unknown"
+                for tag in chunk.tags:
+                    lowered = str(tag).strip().lower()
+                    if lowered == "role:user":
+                        role = "user"
+                        break
+                    if lowered == "role:assistant":
+                        role = "assistant"
+                        break
             metadatas.append(
                 {
                     "session_id": chunk.session_id,
                     "tags": ",".join(chunk.tags),
                     "score_hint": float(chunk.score_hint),
+                    "role": role,
                 }
             )
 
@@ -403,7 +426,11 @@ class VectorEngine(MemoryEngine):
 
             if relevance < min_relevance:
                 continue
-            hits.append(MemoryHit(chunk_id=item_id, content=content, relevance=relevance, metadata=meta or {}))
+            norm_meta = dict(meta or {})
+            tags_value = norm_meta.get("tags", "")
+            if isinstance(tags_value, str):
+                norm_meta["tags"] = [x for x in tags_value.split(",") if x]
+            hits.append(MemoryHit(chunk_id=item_id, content=content, relevance=relevance, metadata=norm_meta))
 
         hits.sort(key=lambda x: x.relevance, reverse=True)
 

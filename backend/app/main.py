@@ -211,6 +211,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
                 "judge": str(payload.config.judge_llm_provider or payload.config.llm_provider),
                 "summarizer": str(payload.config.summarizer_llm_provider or payload.config.llm_provider),
                 "entity": str(payload.config.entity_llm_provider or payload.config.llm_provider),
+                "reflector": str(payload.config.reflector_llm_provider or payload.config.llm_provider),
                 "embedding": str(payload.config.embedding_provider),
                 "compute_device": payload.config.compute_device,
             },
@@ -226,12 +227,14 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         judge_provider = payload.config.judge_llm_provider or payload.config.llm_provider
         summarizer_provider = payload.config.summarizer_llm_provider or payload.config.llm_provider
         entity_provider = payload.config.entity_llm_provider or payload.config.llm_provider
+        reflector_provider = payload.config.reflector_llm_provider or payload.config.llm_provider
         compute_device = payload.config.compute_device
 
         llm_client = ProviderFactory.build_chat_llm(chat_provider, compute_device)
         judge_llm_client = ProviderFactory.build_judge_llm(judge_provider, compute_device)
         summarizer_llm_client = ProviderFactory.build_summarizer_llm(summarizer_provider, compute_device)
         entity_llm_client = ProviderFactory.build_entity_llm(entity_provider, compute_device)
+        reflector_llm_client = ProviderFactory.build_reflector_llm(reflector_provider, compute_device)
         embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider, compute_device)
 
         effective_collection_name = payload.retrieval.collection_name
@@ -269,7 +272,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
         assembler = build_assembler(payload.config.assembler)
         reflector = build_reflector(
             payload.config.reflector,
-            reflection_llm_client=summarizer_llm_client,
+            reflection_llm_client=reflector_llm_client,
             llm_mode=retrieval_cfg.reflector_llm_mode,
         )
         bench = LLMJudgeBench(llm_client=judge_llm_client)
@@ -279,6 +282,8 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             user_id=payload.user_id,
             message=payload.input_text,
             metadata={
+                "role": "user",
+                "assistant_message": payload.assistant_message or "",
                 "llm_preview": f"{llm_client.provider}:{llm_client.model}",
                 "embedding_preview": embedding_client.embed(payload.input_text),
             },
@@ -289,6 +294,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             text=payload.input_text,
             mode=retrieval_cfg.short_term_mode,
             summary_keep_recent_turns=retrieval_cfg.stm_summary_keep_recent_turns,
+            role="user",
             llm_client=summarizer_llm_client,
         )
 
@@ -347,6 +353,31 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             system_prompt="你是一个可靠的 AI 助手。",
             purpose="chat_response",
         )
+
+        STM_MANAGER.ingest(
+            session_id=payload.session_id,
+            text=agent_response,
+            mode=retrieval_cfg.short_term_mode,
+            summary_keep_recent_turns=retrieval_cfg.stm_summary_keep_recent_turns,
+            role="assistant",
+            llm_client=summarizer_llm_client,
+        )
+
+        # 将助手回复按同一 Processor 规则单独写入记忆，供后续轮次检索。
+        assistant_input = RawConversationInput(
+            session_id=payload.session_id,
+            user_id=payload.user_id,
+            message="",
+            metadata={
+                "role": "assistant",
+                "assistant_message": agent_response,
+                "llm_preview": f"{llm_client.provider}:{llm_client.model}",
+            },
+        )
+        assistant_output = processor.process(assistant_input)
+        assistant_chunks = [c for c in assistant_output.chunks if str((c.metadata or {}).get("role", "")).strip().lower() == "assistant"]
+        if assistant_chunks:
+            engine.save(EngineSaveRequest(source=assistant_output.source, chunks=assistant_chunks))
 
         eval_result = bench.evaluate(
             EvalRequest(

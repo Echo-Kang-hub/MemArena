@@ -9,7 +9,7 @@ from app.models.contracts import MemoryHit, ShortTermMemoryMode
 
 @dataclass
 class _SessionSTMState:
-    turns: list[str] = field(default_factory=list)
+    turns: list[dict[str, str]] = field(default_factory=list)
     rolling_summary: str = ""
     blackboard: dict[str, str] = field(default_factory=dict)
 
@@ -68,6 +68,19 @@ def _heuristic_summarize(text: str, max_sentences: int = 3) -> str:
     return " ".join(sents[i] for i, _ in keep_idx)
 
 
+def _looks_like_invalid_llm_summary(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered.startswith("llm provider call failed:"):
+        return True
+    if lowered.startswith("[local:"):
+        return True
+    if "for more information check:" in lowered and "status/401" in lowered:
+        return True
+    return False
+
+
 class ShortTermMemoryManager:
     def __init__(self) -> None:
         self._states: dict[str, _SessionSTMState] = {}
@@ -113,10 +126,14 @@ class ShortTermMemoryManager:
     def _compress_rolling_summary(
         self,
         old_summary: str,
-        overflow_turns: list[str],
+        overflow_turns: list[dict[str, str]],
         llm_client: Any | None,
     ) -> str:
-        overflow_text = "\n".join(f"- {x}" for x in overflow_turns if x.strip())
+        overflow_text = "\n".join(
+            f"- [{str(x.get('role', 'unknown'))}] {str(x.get('text', '')).strip()}"
+            for x in overflow_turns
+            if str(x.get("text", "")).strip()
+        )
         if not overflow_text.strip():
             return old_summary
 
@@ -130,7 +147,7 @@ class ShortTermMemoryManager:
             try:
                 merged = llm_client.generate(prompt, system_prompt="你是记忆压缩助手。", purpose="stm_summary_update")
                 merged = (merged or "").strip()
-                if merged:
+                if merged and not _looks_like_invalid_llm_summary(merged):
                     return merged
             except Exception:
                 pass
@@ -144,17 +161,21 @@ class ShortTermMemoryManager:
         text: str,
         mode: ShortTermMemoryMode,
         summary_keep_recent_turns: int,
+        role: str = "user",
         llm_client: Any | None = None,
     ) -> None:
         if mode == ShortTermMemoryMode.none:
             return
 
         state = self._state(session_id)
-        state.turns.append(text)
+        role_norm = str(role or "unknown").strip().lower()
+        if role_norm not in {"user", "assistant"}:
+            role_norm = "unknown"
+        state.turns.append({"role": role_norm, "text": str(text or "")})
         if len(state.turns) > 120:
             state.turns = state.turns[-120:]
 
-        if mode == ShortTermMemoryMode.working_memory_blackboard:
+        if mode == ShortTermMemoryMode.working_memory_blackboard and role_norm == "user":
             self._update_blackboard(state, text)
             return
 
@@ -165,38 +186,41 @@ class ShortTermMemoryManager:
                 state.turns = state.turns[-keep:]
                 state.rolling_summary = self._compress_rolling_summary(state.rolling_summary, overflow, llm_client)
 
-    def _select_by_token_budget(self, turns: list[str], token_budget: int) -> list[str]:
-        selected: list[str] = []
+    def _select_by_token_budget(self, turns: list[dict[str, str]], token_budget: int) -> list[dict[str, str]]:
+        selected: list[dict[str, str]] = []
         used = 0
-        for text in reversed(turns):
+        for turn in reversed(turns):
+            text = str(turn.get("text", ""))
             cost = _estimate_tokens(text)
             if selected and used + cost > token_budget:
                 break
-            selected.append(text)
+            selected.append(turn)
             used += cost
         selected.reverse()
         return selected
 
-    def _build_turn_hits(self, query: str, turns: list[str], source: str, top_k: int) -> list[MemoryHit]:
+    def _build_turn_hits(self, query: str, turns: list[dict[str, str]], source: str, top_k: int) -> list[MemoryHit]:
         if not turns:
             return []
 
-        weighted: list[tuple[float, int, str]] = []
+        weighted: list[tuple[float, int, str, str]] = []
         total = len(turns)
-        for idx, text in enumerate(turns):
+        for idx, turn in enumerate(turns):
+            text = str(turn.get("text", ""))
+            role = str(turn.get("role", "unknown")).strip().lower() or "unknown"
             recency = (idx + 1) / total
             lexical = _lexical_score(query, text)
             score = min(1.0, 0.6 * recency + 0.4 * lexical)
-            weighted.append((score, idx, text))
+            weighted.append((score, idx, role, text))
 
         weighted.sort(key=lambda x: x[0], reverse=True)
         picked = weighted[: max(1, top_k)]
         return [
             MemoryHit(
                 chunk_id=f"stm-{source}-{i}",
-                content=item[2],
+                content=item[3],
                 relevance=float(item[0]),
-                metadata={"stm_source": source, "stm_index": item[1], "stm": True},
+                metadata={"stm_source": source, "stm_index": item[1], "stm": True, "role": item[2]},
             )
             for i, item in enumerate(picked, start=1)
         ]

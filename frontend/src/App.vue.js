@@ -12,6 +12,7 @@ const config = ref({
     judge_llm_provider: 'api',
     summarizer_llm_provider: 'api',
     entity_llm_provider: 'api',
+    reflector_llm_provider: 'api',
     embedding_provider: 'ollama',
     summarizer_method: 'llm',
     entity_extractor_method: 'llm_triple',
@@ -71,6 +72,7 @@ const reflectors = [
     'GenerativeReflection',
     'ConflictResolver',
     'Consolidator',
+    'ConflictConsolidator',
     'DecayFilter',
     'InsightLinker',
     'AbstractionReflector'
@@ -591,21 +593,49 @@ const batchSafetyInterpretation = computed(() => {
     }
     return '未知问题拒答正确率偏低，建议优先排查误答模式与拒答策略。';
 });
+const singleRoleGroupedHits = computed(() => {
+    if (!result.value) {
+        return null;
+    }
+    const hits = result.value.search_result.hits;
+    const byRole = (subset) => {
+        const user = subset.filter((h) => String(h.metadata?.role || '').toLowerCase() === 'user');
+        const assistant = subset.filter((h) => String(h.metadata?.role || '').toLowerCase() === 'assistant');
+        const other = subset.filter((h) => {
+            const role = String(h.metadata?.role || '').toLowerCase();
+            return role !== 'user' && role !== 'assistant';
+        });
+        return { user, assistant, other };
+    };
+    const stm = byRole(hits.filter((h) => Boolean(h.metadata?.stm)));
+    const ltm = byRole(hits.filter((h) => !Boolean(h.metadata?.stm)));
+    return { stm, ltm };
+});
 const markdownReport = computed(() => {
+    const formatRoleLines = (hits, role) => {
+        const roleHits = hits.filter((hit) => {
+            const r = String(hit.metadata?.role || '').toLowerCase();
+            if (role === 'other') {
+                return r !== 'user' && r !== 'assistant';
+            }
+            return r === role;
+        });
+        return roleHits.length
+            ? roleHits
+                .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
+                .join('\n')
+            : '- (none)';
+    };
     if (result.value) {
         const r = result.value;
         const stmHits = r.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
         const ltmHits = r.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
-        const stmLines = stmHits.length
-            ? stmHits
-                .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
-                .join('\n')
-            : '- (none)';
-        const ltmLines = ltmHits.length
-            ? ltmHits
-                .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
-                .join('\n')
-            : '- (none)';
+        const stmUserLines = formatRoleLines(stmHits, 'user');
+        const stmAssistantLines = formatRoleLines(stmHits, 'assistant');
+        const stmOtherLines = formatRoleLines(stmHits, 'other');
+        const ltmUserLines = formatRoleLines(ltmHits, 'user');
+        const ltmAssistantLines = formatRoleLines(ltmHits, 'assistant');
+        const ltmOtherLines = formatRoleLines(ltmHits, 'other');
         return [
             '# MemArena Test Report',
             '',
@@ -619,10 +649,20 @@ const markdownReport = computed(() => {
             r.generated_response || '(empty)',
             '',
             '## Agent Real-time Memory (STM)',
-            stmLines,
+            '### User',
+            stmUserLines,
+            '### Assistant',
+            stmAssistantLines,
+            '### Other',
+            stmOtherLines,
             '',
             '## Agent Real-time Memory (LTM)',
-            ltmLines,
+            '### User',
+            ltmUserLines,
+            '### Assistant',
+            ltmAssistantLines,
+            '### Other',
+            ltmOtherLines,
             '',
             '## Metrics',
             `- precision: ${r.eval_result.metrics.precision}`,
@@ -666,25 +706,31 @@ const markdownReport = computed(() => {
             .map((c, idx) => {
             const stmHits = c.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
             const ltmHits = c.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
-            const stmLines = stmHits.length
-                ? stmHits
-                    .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
-                    .join('\n')
-                : '  - (none)';
-            const ltmLines = ltmHits.length
-                ? ltmHits
-                    .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
-                    .join('\n')
-                : '  - (none)';
+            const stmUser = formatRoleLines(stmHits, 'user').replace(/^- /gm, '  - ');
+            const stmAssistant = formatRoleLines(stmHits, 'assistant').replace(/^- /gm, '  - ');
+            const stmOther = formatRoleLines(stmHits, 'other').replace(/^- /gm, '  - ');
+            const ltmUser = formatRoleLines(ltmHits, 'user').replace(/^- /gm, '  - ');
+            const ltmAssistant = formatRoleLines(ltmHits, 'assistant').replace(/^- /gm, '  - ');
+            const ltmOther = formatRoleLines(ltmHits, 'other').replace(/^- /gm, '  - ');
             return [
                 `### Case ${idx + 1}`,
                 `- run_id: ${c.run_id}`,
                 '- Agent Reply:',
                 c.generated_response || '(empty)',
                 '- Agent Real-time Memory (STM):',
-                stmLines,
+                '  - User:',
+                stmUser,
+                '  - Assistant:',
+                stmAssistant,
+                '  - Other:',
+                stmOther,
                 '- Agent Real-time Memory (LTM):',
-                ltmLines,
+                '  - User:',
+                ltmUser,
+                '  - Assistant:',
+                ltmAssistant,
+                '  - Other:',
+                ltmOther,
                 '- Metrics:',
                 `  - precision: ${c.eval_result.metrics.precision}`,
                 `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
@@ -1171,6 +1217,23 @@ if (__VLS_ctx.isEntityExtractorProcessor) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
         value: (__VLS_ctx.config.entity_llm_provider),
+        ...{ class: "select" },
+    });
+    for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (x),
+            value: (x),
+        });
+        (x);
+    }
+}
+if (__VLS_ctx.config.reflector !== 'None') {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.config.reflector_llm_provider),
         ...{ class: "select" },
     });
     for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
@@ -1751,6 +1814,119 @@ if (__VLS_ctx.result) {
         ...{ class: "max-h-60 overflow-auto text-xs text-slate-200" },
     });
     (__VLS_ctx.result.assemble_result.prompt);
+    if (__VLS_ctx.singleRoleGroupedHits) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-xl border border-slate-600/60 bg-slate-900/60 p-3" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({
+            ...{ class: "mb-2 text-sm font-semibold text-arena-mint" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "grid grid-cols-1 gap-3 md:grid-cols-2" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-lg border border-slate-700/60 bg-slate-900/40 p-2" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.stm.user))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`stm-u-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.stm.user.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.stm.assistant))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`stm-a-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.stm.assistant.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.stm.other))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`stm-o-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.stm.other.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "rounded-lg border border-slate-700/60 bg-slate-900/40 p-2" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.ltm.user))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`ltm-u-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.ltm.user.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.ltm.assistant))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`ltm-a-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.ltm.assistant.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-xs font-semibold text-slate-200" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+            ...{ class: "mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300" },
+        });
+        for (const [h, i] of __VLS_getVForSourceType((__VLS_ctx.singleRoleGroupedHits.ltm.other))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+                key: (`ltm-o-${i}`),
+            });
+            (h.relevance.toFixed(4));
+            (h.content);
+        }
+        if (__VLS_ctx.singleRoleGroupedHits.ltm.other.length === 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
+        }
+    }
     if (__VLS_ctx.singleReasoningChains.length > 0) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "rounded-xl border border-slate-600/60 bg-slate-900/60 p-3" },
@@ -2023,6 +2199,8 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
@@ -2375,6 +2553,93 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['grid-cols-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['md:grid-cols-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-700/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-700/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['max-h-28']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
 /** @type {__VLS_StyleScopedClasses['mb-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
@@ -2671,6 +2936,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             singleSafetySignals: singleSafetySignals,
             batchSafetySignals: batchSafetySignals,
             batchSafetyInterpretation: batchSafetyInterpretation,
+            singleRoleGroupedHits: singleRoleGroupedHits,
             renderedMarkdownReport: renderedMarkdownReport,
             downloadMarkdownReport: downloadMarkdownReport,
             handleDatasetUpload: handleDatasetUpload,

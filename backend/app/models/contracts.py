@@ -34,6 +34,7 @@ class ReflectorType(str, Enum):
     generative_reflection = "GenerativeReflection"
     conflict_resolver = "ConflictResolver"
     consolidator = "Consolidator"
+    conflict_consolidator = "ConflictConsolidator"
     decay_filter = "DecayFilter"
     insight_linker = "InsightLinker"
     abstraction_reflector = "AbstractionReflector"
@@ -202,6 +203,7 @@ class BenchmarkConfig(BaseModel):
     judge_llm_provider: ProviderType | None = None
     summarizer_llm_provider: ProviderType | None = None
     entity_llm_provider: ProviderType | None = None
+    reflector_llm_provider: ProviderType | None = None
     embedding_provider: ProviderType
     summarizer_method: SummarizerMethod = SummarizerMethod.llm
     entity_extractor_method: EntityExtractorMethod = EntityExtractorMethod.llm_triple
@@ -230,6 +232,7 @@ class BenchmarkRunRequest(BaseModel):
     session_id: str = "demo-session"
     user_id: str = "demo-user"
     input_text: str
+    assistant_message: str | None = None
     expected_facts: list[str] = Field(default_factory=list)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 

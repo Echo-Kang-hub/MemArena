@@ -19,6 +19,7 @@
 	- `llm`：使用专用 Summarizer LLM 生成 3-5 条可检索摘要点。
 	- `kmeans`：按句子 TF-IDF + KMeans 聚类选代表句摘要。
 - 运行说明：当 `kmeans` 依赖不可用时，后端会自动降级为启发式摘要，流程不中断。
+- 输出健康性保护：当 LLM 返回 provider 错误文本（如 401/429）或本地占位文本时，不直接入库；会自动回退到启发式摘要，避免错误信息污染长期记忆。
 
 ### EntityExtractor
 - 定义：只提取实体（人名、地点、项目等）与结构化线索。
@@ -37,13 +38,16 @@
 	- `*_triple` 必须使用 `GraphEngine`。
 	- `*_attribute` 与 `mem0_*` 必须使用 `RelationalEngine`。
 - 运行说明：当 spaCy 不可用时，后端会自动降级为启发式实体候选；当外部 LLM 不可用（如 401/429）或返回不可解析结果时，会回退为启发式三元组/属性抽取，避免结构化输出为空。
+- 熔断说明：当 `entity_extract_*` 通道首次出现 401/429 后，当前后端进程会对该实体 API 路由启用轻量熔断，后续同路由请求直接走本地回退，避免重复外呼与重复告警。
 
 ### EntityExtractor.mem0 系列补充
 - 功能作用：面向“长期记忆事实化”，优先抽取可复用事实，不强调三元组结构。
+- 当前实现修正：mem0 在处理阶段采用“双路抽取”策略（user + assistant 同轮抽取），并分别入库打上 `role:user` / `role:assistant`。
 - 输入约束：
-	- `mem0_user_facts` 仅看用户文本。
-	- `mem0_agent_facts` 仅看 `metadata.assistant_message`。
-	- `mem0_dual_facts` 分别抽取并合并。
+	- user 通道读取用户文本。
+	- assistant 通道读取 `metadata.assistant_message`。
+	- `mem0_user_facts / mem0_agent_facts / mem0_dual_facts` 在兼容层仍保留，但运行时统一走双路抽取。
+- 检索与决策：先由引擎（常见是 `VectorEngine`）做相似检索，再由 Reflector（推荐 `Consolidator`）产出 `memory_decision`（keep/update/drop）。
 - 输出结构：统一落为属性型条目，便于 `RelationalEngine` 检索与后续审计。
 - 优点：对偏好、计划、约束类事实更鲁棒。
 - 缺点：关系路径推理能力弱于三元组模式。
@@ -127,13 +131,34 @@
 - 适用：更正/纠错场景，关注错误事实的收敛清理效率。
 - LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
 - 自动写回联动：可把 `proposed_resolutions` 写回控制块，用于检索阶段抑制过时值分数。
+- 角色定位：**冲突裁决器**（谁对谁错、旧值如何降级）。
 
 ### Consolidator
-- 定义：相似度检测 + 融合式更新 + 错误纠正，减少冗余并处理属性过期。
+- 定义：相似度检测 + 融合式更新，减少冗余并处理属性过期。
 - 适用：用户身份/属性发生阶段性变化（如“曾经是程序员，现在是摄影师”）。
-- 纠错策略：若用户明确指出之前错误，优先清理错误事实并保留纠正后事实。
-- 对应引擎：`RelationalEngine` / `GraphEngine`。
+- 纠错策略：可给出决策建议，但默认不替代冲突裁决写回。
+- 对应引擎：`VectorEngine` / `RelationalEngine` / `GraphEngine`（反思器消费检索命中，理论上引擎无关）。
 - LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
+- 角色定位：**去重融合器**（哪些应合并、保留、下沉）。
+- 输出补充：支持 `memory_decision`（keep/update/drop）供上层策略消费。
+
+### ConflictConsolidator
+- 定义：组合反思器，串联 `Consolidator` 与 `ConflictResolver`，同时输出“融合决策 + 冲突裁决建议”。
+- 适用：用户出现“我之前说错了/请更正”为代表的纠错场景，需要在同一轮里完成去重压缩与错误更正。
+- 输出：
+	- `memory_decision`（keep/update/drop，来自融合阶段）
+	- `proposed_resolutions`（冲突裁决候选，来自冲突阶段）
+- 对应引擎：`VectorEngine` / `RelationalEngine` / `GraphEngine`（三者均可适配）。
+- LLM 方案：支持 `Heuristic / LLM / LLMWithFallback`。
+
+### Consolidator 与 ConflictResolver 的区别
+- 不重叠点：
+	- Consolidator 关注“冗余与合并”（同义/近重复）。
+	- ConflictResolver 关注“冲突与裁决”（互斥事实、版本胜出）。
+- 实践建议：
+	- 先 Consolidator 做压缩与候选决策，
+	- 再 ConflictResolver 做最终冲突裁决与写回。
+- 结论：Consolidator 不等同 ConflictResolver，二者是互补关系而非包含关系。
 
 ### DecayFilter
 - 定义：基于 Ebbinghaus 遗忘曲线打分，按保留分衰减长尾记忆权重。
@@ -159,12 +184,37 @@
 	- `LLMWithFallback`：LLM 失败时自动回退启发式（默认推荐）。
 - 前端已提供统一下拉选择。
 
+### Reflector 独立 LLM 路由
+- 除 `retrieval.reflector_llm_mode` 外，Reflector 还支持独立 Provider 路由，配置键与 Summarizer/EntityExtractor 对齐：
+	- `REFLECTOR_LLM_PROVIDER`
+	- `REFLECTOR_API_BASE_URL`
+	- `REFLECTOR_API_KEY`
+	- `REFLECTOR_API_MODEL`
+	- `REFLECTOR_OLLAMA_BASE_URL`
+	- `REFLECTOR_OLLAMA_MODEL`
+	- `REFLECTOR_LOCAL_MODEL_PATH`
+- 前端可在配置面板中单独选择 `Reflector LLM Provider`，与 Chat/Judge/Summarizer/Entity 互不绑定。
+
 ## 6. STM/LTM 合并与展示约束
 - 检索合并时会按内容去重（避免 STM 与 LTM 同文重复显示）。
 - 前端 Markdown 报告会分开展示：
 	- `Agent Real-time Memory (STM)`
 	- `Agent Real-time Memory (LTM)`
 - 说明：若内容完全相同，最终仅保留一条以减少噪声；优先保留 STM 命中顺序。 
+- Prompt 注入分区：Assembler 会按角色输出独立分区，至少包含 `[MEMORY_USER]` 与 `[MEMORY_ASSISTANT]`（可选 `[MEMORY_OTHER]`）。
+- 回归保障：已增加 API 端到端回归用例，断言最终 prompt 中必须出现 `[MEMORY_USER]` 与 `[MEMORY_ASSISTANT]`。
+- 可视化展示：除 Markdown 报告外，Results Dashboard 也支持按 `STM/LTM × role(user/assistant/other)` 分组查看命中。
+
+### STM 策略语义补充
+- `short_term_memory_mode = none`：表示关闭 STM 检索与注入，仅走 LTM 路径；不等于关闭全部记忆。
+- `isolate_sessions = true`（每个 case 独立会话，推荐）：批量评测中按 case 维度隔离 session，case 之间不串扰；不是按整份数据集共用一个会话。
+
+## 7. Role-Split 记忆约束（User / Assistant）
+- 所有 Memory Processor 产出的记忆块都应尽量按角色拆分，并附加角色标签：
+	- `role:user`
+	- `role:assistant`
+- Engine 存储应保留 `metadata.role` 与 `metadata.tags`。
+- 检索返回后，Assembler 在 prompt 中按角色分区注入（User Memory / Assistant Memory / Other Memory）。
 
 ## 5. Evaluation Bench（评估台）
 

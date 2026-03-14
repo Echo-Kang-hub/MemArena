@@ -105,8 +105,38 @@ def _extract_json_text(raw: str) -> str:
     return stripped
 
 
+def _looks_like_invalid_llm_text(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered.startswith("llm provider call failed:"):
+        return True
+    if lowered.startswith("[local:"):
+        return True
+    if "for more information check:" in lowered and "status/401" in lowered:
+        return True
+    return False
+
+
 def _build_chunk_id(session_id: str, suffix: str) -> str:
     return f"{session_id}-{suffix}-{uuid4().hex[:8]}"
+
+
+def _extract_role_texts(payload: RawConversationInput) -> tuple[str, str]:
+    user_text = str(payload.message or "").strip()
+    assistant_text = str((payload.metadata or {}).get("assistant_message", "") or "").strip()
+    return user_text, assistant_text
+
+
+def _infer_role_tags(role: str) -> list[str]:
+    return [f"role:{role}"] if role in {"user", "assistant"} else ["role:unknown"]
+
+
+def _compose_role_metadata(payload: RawConversationInput, role: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta = {**payload.metadata, "role": role}
+    if extra:
+        meta.update(extra)
+    return meta
 
 
 def _build_mem0_prompt(role: str, conversation_text: str) -> str:
@@ -150,14 +180,32 @@ def _heuristic_mem0_facts(text: str) -> list[str]:
 class RawLoggerProcessor(MemoryProcessor):
     # 全量记录：原始文本直接落入记忆块
     def process(self, payload: RawConversationInput) -> ProcessorOutput:
-        chunk = MemoryChunk(
-            chunk_id=_build_chunk_id(payload.session_id, "raw"),
-            session_id=payload.session_id,
-            content=payload.message,
-            tags=["raw", "full"],
-            metadata=payload.metadata,
-        )
-        return ProcessorOutput(source=ProcessorType.raw_logger, chunks=[chunk])
+        user_text, assistant_text = _extract_role_texts(payload)
+        chunks: list[MemoryChunk] = []
+
+        if user_text:
+            chunks.append(
+                MemoryChunk(
+                    chunk_id=_build_chunk_id(payload.session_id, "raw-user"),
+                    session_id=payload.session_id,
+                    content=user_text,
+                    tags=["raw", "full", *_infer_role_tags("user")],
+                    metadata=_compose_role_metadata(payload, "user"),
+                )
+            )
+
+        if assistant_text:
+            chunks.append(
+                MemoryChunk(
+                    chunk_id=_build_chunk_id(payload.session_id, "raw-assistant"),
+                    session_id=payload.session_id,
+                    content=assistant_text,
+                    tags=["raw", "full", *_infer_role_tags("assistant")],
+                    metadata=_compose_role_metadata(payload, "assistant"),
+                )
+            )
+
+        return ProcessorOutput(source=ProcessorType.raw_logger, chunks=chunks)
 
 
 class SummarizerProcessor(MemoryProcessor):
@@ -177,7 +225,11 @@ class SummarizerProcessor(MemoryProcessor):
             f"原文:\n{text}"
         )
         response = self.llm_client.generate(prompt, system_prompt="你是记忆压缩助手。", purpose="summarizer_llm")
-        return response.strip() or text[:220]
+        candidate = (response or "").strip()
+        if _looks_like_invalid_llm_text(candidate):
+            sentences = _split_sentences(text)
+            return _heuristic_summary(sentences, max_sentences=3) or text[:220]
+        return candidate
 
     def _kmeans_summary(self, text: str) -> tuple[str, dict[str, Any]]:
         sentences = _split_sentences(text)
@@ -214,20 +266,32 @@ class SummarizerProcessor(MemoryProcessor):
 
     # 成熟版摘要：支持 LLM 与 K-Means 聚类摘要
     def process(self, payload: RawConversationInput) -> ProcessorOutput:
-        if self.method == SummarizerMethod.kmeans:
-            summary, method_meta = self._kmeans_summary(payload.message)
-        else:
-            summary = self._llm_summary(payload.message)
-            method_meta = {}
+        user_text, assistant_text = _extract_role_texts(payload)
+        chunks: list[MemoryChunk] = []
 
-        chunk = MemoryChunk(
-            chunk_id=_build_chunk_id(payload.session_id, "sum"),
-            session_id=payload.session_id,
-            content=f"摘要: {summary}",
-            tags=["summary", f"method:{self.method.value}"],
-            metadata={"method": self.method.value, **method_meta, **payload.metadata},
-        )
-        return ProcessorOutput(source=ProcessorType.summarizer, chunks=[chunk])
+        def build_summary_chunk(text: str, role: str) -> None:
+            if not text:
+                return
+            if self.method == SummarizerMethod.kmeans:
+                summary, method_meta = self._kmeans_summary(text)
+            else:
+                summary = self._llm_summary(text)
+                method_meta = {}
+
+            prefix = "用户摘要" if role == "user" else "助手摘要"
+            chunks.append(
+                MemoryChunk(
+                    chunk_id=_build_chunk_id(payload.session_id, f"sum-{role}"),
+                    session_id=payload.session_id,
+                    content=f"{prefix}: {summary}",
+                    tags=["summary", f"method:{self.method.value}", *_infer_role_tags(role)],
+                    metadata=_compose_role_metadata(payload, role, {"method": self.method.value, **method_meta}),
+                )
+            )
+
+        build_summary_chunk(user_text, "user")
+        build_summary_chunk(assistant_text, "assistant")
+        return ProcessorOutput(source=ProcessorType.summarizer, chunks=chunks)
 
 
 class EntityExtractorProcessor(MemoryProcessor):
@@ -350,7 +414,7 @@ class EntityExtractorProcessor(MemoryProcessor):
 
     # 成熟版实体抽取：支持 LLM、spaCy+LLM，输出三元组或属性两类结构
     def process(self, payload: RawConversationInput) -> ProcessorOutput:
-        entities = self._extract_candidates(payload.message)
+        user_text, assistant_text = _extract_role_texts(payload)
         is_triple_mode = self.method in {
             EntityExtractorMethod.llm_triple,
             EntityExtractorMethod.spacy_llm_triple,
@@ -361,67 +425,95 @@ class EntityExtractorProcessor(MemoryProcessor):
             EntityExtractorMethod.mem0_agent_facts,
             EntityExtractorMethod.mem0_dual_facts,
         }:
-            user_text = payload.message
-            assistant_text = str(payload.metadata.get("assistant_message", "") or "")
+            # mem0 双路抽取：同一轮同时提取 user + assistant 事实。
+            user_facts = self._mem0_extract_facts(user_text, role="user") if user_text else []
+            assistant_facts = self._mem0_extract_facts(assistant_text, role="assistant") if assistant_text else []
 
-            user_facts: list[str] = []
-            assistant_facts: list[str] = []
-            if self.method in {EntityExtractorMethod.mem0_user_facts, EntityExtractorMethod.mem0_dual_facts}:
-                user_facts = self._mem0_extract_facts(user_text, role="user")
-            if self.method in {EntityExtractorMethod.mem0_agent_facts, EntityExtractorMethod.mem0_dual_facts}:
-                assistant_facts = self._mem0_extract_facts(assistant_text, role="assistant")
+            chunks: list[MemoryChunk] = []
+            if user_facts:
+                user_attributes = [{"entity": "user", "attribute": "fact", "value": f} for f in user_facts]
+                chunks.append(
+                    MemoryChunk(
+                        chunk_id=_build_chunk_id(payload.session_id, "ent-user"),
+                        session_id=payload.session_id,
+                        content="mem0_user_facts:\n" + "\n".join(user_facts),
+                        tags=["entity", "attribute", "relational", "mem0", f"method:{self.method.value}", *_infer_role_tags("user")],
+                        metadata=_compose_role_metadata(
+                            payload,
+                            "user",
+                            {
+                                "entities": self._extract_candidates(user_text),
+                                "attributes": user_attributes,
+                                "user_facts": user_facts,
+                                "assistant_facts": [],
+                                "method": self.method.value,
+                                "mem0_dual_extraction": True,
+                            },
+                        ),
+                    )
+                )
 
-            lines: list[str] = []
-            attributes: list[dict[str, str]] = []
-            for f in user_facts:
-                lines.append(f"[user] {f}")
-                attributes.append({"entity": "user", "attribute": "fact", "value": f})
-            for f in assistant_facts:
-                lines.append(f"[assistant] {f}")
-                attributes.append({"entity": "assistant", "attribute": "fact", "value": f})
+            if assistant_facts:
+                assistant_attributes = [{"entity": "assistant", "attribute": "fact", "value": f} for f in assistant_facts]
+                chunks.append(
+                    MemoryChunk(
+                        chunk_id=_build_chunk_id(payload.session_id, "ent-assistant"),
+                        session_id=payload.session_id,
+                        content="mem0_assistant_facts:\n" + "\n".join(assistant_facts),
+                        tags=["entity", "attribute", "relational", "mem0", f"method:{self.method.value}", *_infer_role_tags("assistant")],
+                        metadata=_compose_role_metadata(
+                            payload,
+                            "assistant",
+                            {
+                                "entities": self._extract_candidates(assistant_text),
+                                "attributes": assistant_attributes,
+                                "user_facts": [],
+                                "assistant_facts": assistant_facts,
+                                "method": self.method.value,
+                                "mem0_dual_extraction": True,
+                            },
+                        ),
+                    )
+                )
 
-            content = "mem0_facts:\n" + ("\n".join(lines) if lines else "(none)")
-            metadata = {
-                "entities": entities,
-                "attributes": attributes,
-                "user_facts": user_facts,
-                "assistant_facts": assistant_facts,
-                "method": self.method.value,
-                **payload.metadata,
-            }
-            chunk = MemoryChunk(
-                chunk_id=_build_chunk_id(payload.session_id, "ent"),
-                session_id=payload.session_id,
-                content=content,
-                tags=["entity", "attribute", "relational", "mem0", f"method:{self.method.value}"],
-                metadata=metadata,
+            return ProcessorOutput(source=ProcessorType.entity_extractor, chunks=chunks)
+
+        chunks: list[MemoryChunk] = []
+
+        def build_structured_chunk(text: str, role: str) -> None:
+            if not text:
+                return
+
+            entities = self._extract_candidates(text)
+            if is_triple_mode:
+                triples = self._generate_triples(text, entities)
+                if triples:
+                    lines = [f"({t['subject']})-[{t['predicate']}]->({t['object']})" for t in triples]
+                    content = "三元组:\n" + "\n".join(lines)
+                else:
+                    content = "三元组: 无"
+                metadata = _compose_role_metadata(payload, role, {"entities": entities, "triples": triples, "method": self.method.value})
+                tags = ["entity", "triple", "graph", f"method:{self.method.value}", *_infer_role_tags(role)]
+            else:
+                attributes = self._generate_attributes(text, entities)
+                if attributes:
+                    lines = [f"{a['entity']} | {a['attribute']} = {a['value']}" for a in attributes]
+                    content = "属性:\n" + "\n".join(lines)
+                else:
+                    content = "属性: 无"
+                metadata = _compose_role_metadata(payload, role, {"entities": entities, "attributes": attributes, "method": self.method.value})
+                tags = ["entity", "attribute", "relational", f"method:{self.method.value}", *_infer_role_tags(role)]
+
+            chunks.append(
+                MemoryChunk(
+                    chunk_id=_build_chunk_id(payload.session_id, f"ent-{role}"),
+                    session_id=payload.session_id,
+                    content=content,
+                    tags=tags,
+                    metadata=metadata,
+                )
             )
-            return ProcessorOutput(source=ProcessorType.entity_extractor, chunks=[chunk])
 
-        if is_triple_mode:
-            triples = self._generate_triples(payload.message, entities)
-            if triples:
-                lines = [f"({t['subject']})-[{t['predicate']}]->({t['object']})" for t in triples]
-                content = "三元组:\n" + "\n".join(lines)
-            else:
-                content = "三元组: 无"
-            metadata = {"entities": entities, "triples": triples, "method": self.method.value, **payload.metadata}
-            tags = ["entity", "triple", "graph", f"method:{self.method.value}"]
-        else:
-            attributes = self._generate_attributes(payload.message, entities)
-            if attributes:
-                lines = [f"{a['entity']} | {a['attribute']} = {a['value']}" for a in attributes]
-                content = "属性:\n" + "\n".join(lines)
-            else:
-                content = "属性: 无"
-            metadata = {"entities": entities, "attributes": attributes, "method": self.method.value, **payload.metadata}
-            tags = ["entity", "attribute", "relational", f"method:{self.method.value}"]
-
-        chunk = MemoryChunk(
-            chunk_id=_build_chunk_id(payload.session_id, "ent"),
-            session_id=payload.session_id,
-            content=content,
-            tags=tags,
-            metadata=metadata,
-        )
-        return ProcessorOutput(source=ProcessorType.entity_extractor, chunks=[chunk])
+        build_structured_chunk(user_text, "user")
+        build_structured_chunk(assistant_text, "assistant")
+        return ProcessorOutput(source=ProcessorType.entity_extractor, chunks=chunks)

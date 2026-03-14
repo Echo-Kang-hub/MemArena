@@ -28,6 +28,7 @@ const config = ref<BenchmarkConfig>({
   judge_llm_provider: 'api',
   summarizer_llm_provider: 'api',
   entity_llm_provider: 'api',
+  reflector_llm_provider: 'api',
   embedding_provider: 'ollama',
   summarizer_method: 'llm',
   entity_extractor_method: 'llm_triple',
@@ -105,6 +106,7 @@ const reflectors = [
   'GenerativeReflection',
   'ConflictResolver',
   'Consolidator',
+  'ConflictConsolidator',
   'DecayFilter',
   'InsightLinker',
   'AbstractionReflector'
@@ -676,21 +678,55 @@ const batchSafetyInterpretation = computed(() => {
   return '未知问题拒答正确率偏低，建议优先排查误答模式与拒答策略。';
 });
 
+const singleRoleGroupedHits = computed(() => {
+  if (!result.value) {
+    return null;
+  }
+  const hits = result.value.search_result.hits;
+  const byRole = (subset: typeof hits) => {
+    const user = subset.filter((h) => String((h.metadata?.role as string | undefined) || '').toLowerCase() === 'user');
+    const assistant = subset.filter((h) => String((h.metadata?.role as string | undefined) || '').toLowerCase() === 'assistant');
+    const other = subset.filter((h) => {
+      const role = String((h.metadata?.role as string | undefined) || '').toLowerCase();
+      return role !== 'user' && role !== 'assistant';
+    });
+    return { user, assistant, other };
+  };
+
+  const stm = byRole(hits.filter((h) => Boolean(h.metadata?.stm)));
+  const ltm = byRole(hits.filter((h) => !Boolean(h.metadata?.stm)));
+  return { stm, ltm };
+});
+
 const markdownReport = computed(() => {
+  const formatRoleLines = (
+    hits: Array<{ content: string; relevance: number; metadata?: Record<string, unknown> }>,
+    role: 'user' | 'assistant' | 'other'
+  ) => {
+    const roleHits = hits.filter((hit) => {
+      const r = String((hit.metadata?.role as string | undefined) || '').toLowerCase();
+      if (role === 'other') {
+        return r !== 'user' && r !== 'assistant';
+      }
+      return r === role;
+    });
+    return roleHits.length
+      ? roleHits
+          .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
+          .join('\n')
+      : '- (none)';
+  };
+
   if (result.value) {
     const r = result.value;
     const stmHits = r.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
     const ltmHits = r.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
-    const stmLines = stmHits.length
-      ? stmHits
-          .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
-          .join('\n')
-      : '- (none)';
-    const ltmLines = ltmHits.length
-      ? ltmHits
-          .map((hit, idx) => `- [${idx + 1}] score=${hit.relevance.toFixed(4)}\n  - ${hit.content}`)
-          .join('\n')
-      : '- (none)';
+    const stmUserLines = formatRoleLines(stmHits, 'user');
+    const stmAssistantLines = formatRoleLines(stmHits, 'assistant');
+    const stmOtherLines = formatRoleLines(stmHits, 'other');
+    const ltmUserLines = formatRoleLines(ltmHits, 'user');
+    const ltmAssistantLines = formatRoleLines(ltmHits, 'assistant');
+    const ltmOtherLines = formatRoleLines(ltmHits, 'other');
 
     return [
       '# MemArena Test Report',
@@ -705,10 +741,20 @@ const markdownReport = computed(() => {
       r.generated_response || '(empty)',
       '',
       '## Agent Real-time Memory (STM)',
-      stmLines,
+      '### User',
+      stmUserLines,
+      '### Assistant',
+      stmAssistantLines,
+      '### Other',
+      stmOtherLines,
       '',
       '## Agent Real-time Memory (LTM)',
-      ltmLines,
+      '### User',
+      ltmUserLines,
+      '### Assistant',
+      ltmAssistantLines,
+      '### Other',
+      ltmOtherLines,
       '',
       '## Metrics',
       `- precision: ${r.eval_result.metrics.precision}`,
@@ -757,16 +803,12 @@ const markdownReport = computed(() => {
       .map((c, idx) => {
         const stmHits = c.search_result.hits.filter((hit) => Boolean(hit.metadata?.stm));
         const ltmHits = c.search_result.hits.filter((hit) => !Boolean(hit.metadata?.stm));
-        const stmLines = stmHits.length
-          ? stmHits
-              .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
-              .join('\n')
-          : '  - (none)';
-        const ltmLines = ltmHits.length
-          ? ltmHits
-              .map((hit, i) => `  - [${i + 1}] score=${hit.relevance.toFixed(4)}: ${hit.content}`)
-              .join('\n')
-          : '  - (none)';
+        const stmUser = formatRoleLines(stmHits, 'user').replace(/^- /gm, '  - ');
+        const stmAssistant = formatRoleLines(stmHits, 'assistant').replace(/^- /gm, '  - ');
+        const stmOther = formatRoleLines(stmHits, 'other').replace(/^- /gm, '  - ');
+        const ltmUser = formatRoleLines(ltmHits, 'user').replace(/^- /gm, '  - ');
+        const ltmAssistant = formatRoleLines(ltmHits, 'assistant').replace(/^- /gm, '  - ');
+        const ltmOther = formatRoleLines(ltmHits, 'other').replace(/^- /gm, '  - ');
 
         return [
           `### Case ${idx + 1}`,
@@ -774,9 +816,19 @@ const markdownReport = computed(() => {
           '- Agent Reply:',
           c.generated_response || '(empty)',
           '- Agent Real-time Memory (STM):',
-          stmLines,
+          '  - User:',
+          stmUser,
+          '  - Assistant:',
+          stmAssistant,
+          '  - Other:',
+          stmOther,
           '- Agent Real-time Memory (LTM):',
-          ltmLines,
+          '  - User:',
+          ltmUser,
+          '  - Assistant:',
+          ltmAssistant,
+          '  - Other:',
+          ltmOther,
           '- Metrics:',
           `  - precision: ${c.eval_result.metrics.precision}`,
           `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
@@ -1179,6 +1231,12 @@ function downloadCsvReport() {
               <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
+          <label v-if="config.reflector !== 'None'" class="field">
+            <span>Reflector LLM Provider</span>
+            <select v-model="config.reflector_llm_provider" class="select">
+              <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
           <label class="field">
             <span>Embedding Provider</span>
             <select v-model="config.embedding_provider" class="select">
@@ -1332,7 +1390,7 @@ function downloadCsvReport() {
             </div>
             <label class="mt-2 flex items-center gap-2 text-sm text-slate-200">
               <input v-model="isolateSessions" type="checkbox" />
-              <span>每个测试独立会话（推荐）</span>
+              <span>每个 case 独立会话（推荐，批量内 case 之间互不串扰）</span>
             </label>
             <label class="field mt-2">
               <span>Batch Max Concurrency</span>
@@ -1459,6 +1517,47 @@ function downloadCsvReport() {
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Prompt Preview</h3>
             <pre class="max-h-60 overflow-auto text-xs text-slate-200">{{ result.assemble_result.prompt }}</pre>
+          </div>
+
+          <div v-if="singleRoleGroupedHits" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Retrieved Memory by Role</h3>
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">STM / User</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.stm.user" :key="`stm-u-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.stm.user.length === 0">(none)</li>
+                </ul>
+                <p class="mt-2 text-xs font-semibold text-slate-200">STM / Assistant</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.stm.assistant" :key="`stm-a-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.stm.assistant.length === 0">(none)</li>
+                </ul>
+                <p class="mt-2 text-xs font-semibold text-slate-200">STM / Other</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.stm.other" :key="`stm-o-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.stm.other.length === 0">(none)</li>
+                </ul>
+              </div>
+
+              <div class="rounded-lg border border-slate-700/60 bg-slate-900/40 p-2">
+                <p class="text-xs font-semibold text-slate-200">LTM / User</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.ltm.user" :key="`ltm-u-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.ltm.user.length === 0">(none)</li>
+                </ul>
+                <p class="mt-2 text-xs font-semibold text-slate-200">LTM / Assistant</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.ltm.assistant" :key="`ltm-a-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.ltm.assistant.length === 0">(none)</li>
+                </ul>
+                <p class="mt-2 text-xs font-semibold text-slate-200">LTM / Other</p>
+                <ul class="mt-1 max-h-28 list-disc overflow-auto pl-4 text-xs text-slate-300">
+                  <li v-for="(h, i) in singleRoleGroupedHits.ltm.other" :key="`ltm-o-${i}`">[{{ h.relevance.toFixed(4) }}] {{ h.content }}</li>
+                  <li v-if="singleRoleGroupedHits.ltm.other.length === 0">(none)</li>
+                </ul>
+              </div>
+            </div>
           </div>
 
           <div v-if="singleReasoningChains.length > 0" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">

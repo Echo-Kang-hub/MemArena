@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from typing import ClassVar
 
 import httpx
 
@@ -18,6 +19,27 @@ class LLMClient:
     api_key: str = ""
     compute_device: str = "cpu"
 
+    # 进程内轻量熔断：实体抽取遇到 401/429 后，后续同 provider/model/endpoint 直接本地回退。
+    _entity_api_blocked_routes: ClassVar[set[tuple[str, str, str]]] = set()
+
+    def _entity_route_key(self) -> tuple[str, str, str]:
+        return (str(self.provider), self.endpoint.rstrip("/"), self.model)
+
+    @staticmethod
+    def _looks_like_entity_purpose(purpose: str) -> bool:
+        return str(purpose or "").startswith("entity_extract_")
+
+    @staticmethod
+    def _is_auth_or_rate_limited(exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = int(exc.response.status_code)
+            return status in {401, 429}
+        text = str(exc)
+        return ("401" in text) or ("429" in text)
+
+    def _entity_local_fallback(self, prompt: str) -> str:
+        return f"[local:{self.model}] {prompt[:500]}"
+
     def generate(
         self,
         prompt: str,
@@ -26,6 +48,26 @@ class LLMClient:
     ) -> str:
         started = perf_counter()
         try:
+            if (
+                self.provider == ProviderType.api
+                and self._looks_like_entity_purpose(purpose)
+                and self._entity_route_key() in self._entity_api_blocked_routes
+            ):
+                write_audit_event(
+                    "llm_generate",
+                    {
+                        "provider": self.provider,
+                        "model": self.model,
+                        "endpoint": self.endpoint,
+                        "purpose": purpose,
+                        "ok": True,
+                        "duration_ms": round((perf_counter() - started) * 1000, 2),
+                        "prompt_preview": prompt[:200],
+                        "note": "entity api circuit breaker active, fallback to local placeholder",
+                    },
+                )
+                return self._entity_local_fallback(prompt)
+
             if self.provider == ProviderType.api:
                 url = f"{self.endpoint.rstrip('/')}/chat/completions"
                 headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -96,6 +138,38 @@ class LLMClient:
                 },
             )
             return f"[local:{self.model}] {prompt[:500]}"
+        except httpx.HTTPStatusError as exc:
+            if self.provider == ProviderType.api and self._looks_like_entity_purpose(purpose) and self._is_auth_or_rate_limited(exc):
+                self._entity_api_blocked_routes.add(self._entity_route_key())
+                write_audit_event(
+                    "llm_generate",
+                    {
+                        "provider": self.provider,
+                        "model": self.model,
+                        "endpoint": self.endpoint,
+                        "purpose": purpose,
+                        "ok": False,
+                        "duration_ms": round((perf_counter() - started) * 1000, 2),
+                        "prompt_preview": prompt[:200],
+                        "error": str(exc),
+                        "note": "entity api got 401/429, circuit breaker enabled for this route",
+                    },
+                )
+                return self._entity_local_fallback(prompt)
+            write_audit_event(
+                "llm_generate",
+                {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "endpoint": self.endpoint,
+                    "purpose": purpose,
+                    "ok": False,
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                    "prompt_preview": prompt[:200],
+                    "error": str(exc),
+                },
+            )
+            return f"LLM provider call failed: {exc}"
         except Exception as exc:
             write_audit_event(
                 "llm_generate",
@@ -272,6 +346,10 @@ class ProviderFactory:
     @staticmethod
     def build_entity_llm(provider_override: ProviderType | None = None, compute_device: str | None = None) -> LLMClient:
         return ProviderFactory._build_function_llm("entity", provider_override, compute_device)
+
+    @staticmethod
+    def build_reflector_llm(provider_override: ProviderType | None = None, compute_device: str | None = None) -> LLMClient:
+        return ProviderFactory._build_function_llm("reflector", provider_override, compute_device)
 
     @staticmethod
     def build_llm(provider: ProviderType) -> LLMClient:
