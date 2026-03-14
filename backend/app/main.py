@@ -36,6 +36,12 @@ from app.models.contracts import (
     ReflectorLLMMode,
     ReflectorType,
     ShortTermMemoryMode,
+    GlobalModelConfigResponse,
+    GlobalModelConfigUpdateRequest,
+    GlobalModelConnectivityTestRequest,
+    GlobalModelConnectivityTestResponse,
+    GlobalModelConnectivityItem,
+    ProviderType,
 )
 from app.services.request_audit import (
     query_audit_events,
@@ -44,6 +50,7 @@ from app.services.request_audit import (
     write_audit_event,
 )
 from app.services.dataset_loader import list_datasets, load_dataset_cases
+from app.services.global_model_config import env_file_path, read_global_model_config, save_global_model_config
 from app.services.short_term_memory import ShortTermMemoryManager
 from app.registry import build_assembler, build_engine, build_processor, build_reflector
 
@@ -52,6 +59,92 @@ app = FastAPI(title="MemArena Backend", version="0.1.0")
 # 轻量内存任务状态表：用于前端轮询批量任务进度
 RUN_STATES: dict[str, dict] = {}
 STM_MANAGER = ShortTermMemoryManager()
+
+
+def _preview_text(value: str, limit: int = 280) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + " ..."
+
+
+def _trace_chunks(chunks: list[MemoryChunk], limit: int = 12) -> list[dict]:
+    out: list[dict] = []
+    for chunk in chunks[:limit]:
+        meta = chunk.metadata or {}
+        out.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "role": str(meta.get("role", "unknown")),
+                "tags": list(chunk.tags or []),
+                "content_preview": _preview_text(chunk.content, 220),
+                "metadata_keys": sorted(list(meta.keys())),
+            }
+        )
+    return out
+
+
+def _trace_hits(hits, limit: int = 12) -> list[dict]:
+    out: list[dict] = []
+    for hit in hits[:limit]:
+        meta = hit.metadata or {}
+        out.append(
+            {
+                "chunk_id": hit.chunk_id,
+                "relevance": float(hit.relevance),
+                "role": str(meta.get("role", "unknown")),
+                "stm": bool(meta.get("stm", False)),
+                "content_preview": _preview_text(hit.content, 220),
+                "metadata_keys": sorted(list(meta.keys())),
+            }
+        )
+    return out
+
+
+def _is_llm_failure_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    return lowered.startswith("llm provider call failed:")
+
+
+def _test_llm_client(module: str, client) -> GlobalModelConnectivityItem:
+    purpose = f"connectivity_test_{module}"
+    output = client.generate(
+        "只输出 OK。",
+        system_prompt="你是连通性测试助手，只返回 OK。",
+        purpose=purpose,
+    )
+    output_preview = _preview_text(output, 180)
+    ok = not _is_llm_failure_text(output)
+    return GlobalModelConnectivityItem(
+        module=module,
+        kind="llm",
+        provider=str(client.provider),
+        model=str(client.model),
+        endpoint=str(client.endpoint),
+        ok=ok,
+        note="",
+        error="" if ok else output_preview,
+        output_preview=output_preview,
+    )
+
+
+def _test_embedding_client(client) -> GlobalModelConnectivityItem:
+    vec = client.embed("connectivity test")
+    dim = len(vec) if isinstance(vec, list) else 0
+    ok = dim > 0
+    return GlobalModelConnectivityItem(
+        module="embedding",
+        kind="embedding",
+        provider=str(client.provider),
+        model=str(client.model),
+        endpoint=str(client.endpoint),
+        ok=ok,
+        note=(f"dim={dim}" if ok else "empty embedding"),
+        error=("" if ok else "embedding output is empty"),
+        output_preview=(f"vector_dim={dim}" if ok else ""),
+    )
 
 
 def _auto_collection_name(base_name: str, embedding_provider: str, embedding_model: str) -> str:
@@ -194,6 +287,68 @@ def options() -> dict:
 @app.get("/api/datasets")
 def datasets() -> dict:
     return {"datasets": list_datasets()}
+
+
+@app.get("/api/config/global-models", response_model=GlobalModelConfigResponse)
+def get_global_model_config() -> GlobalModelConfigResponse:
+    return GlobalModelConfigResponse(config=read_global_model_config(), env_file=str(env_file_path()))
+
+
+@app.post("/api/config/global-models", response_model=GlobalModelConfigResponse)
+def update_global_model_config(payload: GlobalModelConfigUpdateRequest) -> GlobalModelConfigResponse:
+    save_global_model_config(payload.config)
+    return GlobalModelConfigResponse(config=read_global_model_config(), env_file=str(env_file_path()))
+
+
+@app.post("/api/config/global-models/test", response_model=GlobalModelConnectivityTestResponse)
+def test_global_model_connectivity(payload: GlobalModelConnectivityTestRequest) -> GlobalModelConnectivityTestResponse:
+    modules = [str(m).strip().lower() for m in payload.modules if str(m).strip()]
+    if not modules:
+        modules = ["chat", "judge", "summarizer", "entity", "reflector", "embedding"]
+
+    results: list[GlobalModelConnectivityItem] = []
+
+    builders = {
+        "chat": ProviderFactory.build_chat_llm,
+        "judge": ProviderFactory.build_judge_llm,
+        "summarizer": ProviderFactory.build_summarizer_llm,
+        "entity": ProviderFactory.build_entity_llm,
+        "reflector": ProviderFactory.build_reflector_llm,
+    }
+
+    for module in modules:
+        if module in builders:
+            client = builders[module](None, settings.local_infer_device)
+            results.append(_test_llm_client(module, client))
+            continue
+
+        if module == "embedding":
+            emb_provider = ProviderType(str(settings.embedding_provider or settings.default_embedding_provider))
+            emb_client = ProviderFactory.build_embedding(emb_provider, settings.local_infer_device)
+            results.append(_test_embedding_client(emb_client))
+            continue
+
+        results.append(
+            GlobalModelConnectivityItem(
+                module=module,
+                kind="unknown",
+                provider="",
+                model="",
+                endpoint="",
+                ok=False,
+                note="",
+                error="unsupported module",
+                output_preview="",
+            )
+        )
+
+    passed = sum(1 for item in results if item.ok)
+    return GlobalModelConnectivityTestResponse(
+        tested_modules=modules,
+        passed=passed,
+        total=len(results),
+        results=results,
+    )
 
 
 async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = None) -> BenchmarkRunResponse:
@@ -407,6 +562,126 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
                     min_confidence=float(retrieval_cfg.reflector_writeback_min_confidence),
                 )
 
+        audit_events = query_audit_events(run_id=cur_run_id, limit=600)
+        llm_calls: list[dict] = []
+        for evt in audit_events:
+            if str(evt.get("event_type", "")) != "llm_generate":
+                continue
+            llm_calls.append(
+                {
+                    "ts": str(evt.get("ts", "")),
+                    "purpose": str(evt.get("purpose", "")),
+                    "provider": str(evt.get("provider", "")),
+                    "model": str(evt.get("model", "")),
+                    "ok": bool(evt.get("ok", False)),
+                    "duration_ms": float(evt.get("duration_ms", 0.0) or 0.0),
+                    "prompt_length": int(evt.get("prompt_length", 0) or 0),
+                    "system_prompt_preview": str(evt.get("system_prompt_preview", "")),
+                    "prompt_preview": str(evt.get("prompt_preview", "")),
+                    "response_preview": str(evt.get("response_preview", "")),
+                    "error": str(evt.get("error", "")),
+                    "note": str(evt.get("note", "")),
+                }
+            )
+
+        module_trace = {
+            "config": payload.config.model_dump(),
+            "processor": {
+                "input": {
+                    "session_id": payload.session_id,
+                    "user_id": payload.user_id,
+                    "message": payload.input_text,
+                    "assistant_message": payload.assistant_message or "",
+                    "processor": payload.config.processor.value,
+                },
+                "output": {
+                    "source": processor_output.source.value,
+                    "chunk_count": len(processor_output.chunks),
+                    "chunks": _trace_chunks(processor_output.chunks),
+                },
+            },
+            "engine_save": {
+                "input": {
+                    "source": processor_output.source.value,
+                    "chunk_count": len(processor_output.chunks),
+                    "chunks": _trace_chunks(processor_output.chunks),
+                },
+                "output": save_result.model_dump(),
+            },
+            "engine_search": {
+                "input": search_request.model_dump(),
+                "output": {
+                    "engine": search_result.engine.value,
+                    "hit_count": len(search_result.hits),
+                    "hits": _trace_hits(search_result.hits),
+                },
+            },
+            "assembler": {
+                "input": {
+                    "user_query": payload.input_text,
+                    "memory_hit_count": len(search_result.hits),
+                    "token_budget": retrieval_cfg.max_context_tokens or settings.context_token_budget,
+                },
+                "output": {
+                    "assembler": assemble_result.assembler.value,
+                    "prompt_preview": _preview_text(assemble_result.prompt, 1000),
+                    "preview_blocks_count": len(assemble_result.preview_blocks),
+                },
+            },
+            "chat_generation": {
+                "input": {
+                    "system_prompt": "你是一个可靠的 AI 助手。",
+                    "prompt_preview": _preview_text(assemble_result.prompt, 800),
+                },
+                "output": {
+                    "response_preview": _preview_text(agent_response, 500),
+                },
+            },
+            "assistant_memory_writeback": {
+                "input": {
+                    "assistant_message_preview": _preview_text(agent_response, 300),
+                },
+                "output": {
+                    "chunk_count": len(assistant_chunks),
+                    "chunks": _trace_chunks(assistant_chunks),
+                },
+            },
+            "evaluation": {
+                "input": {
+                    "expected_facts": payload.expected_facts,
+                    "retrieved_count": len(search_result.hits),
+                    "response_preview": _preview_text(agent_response, 220),
+                },
+                "output": {
+                    "metrics": eval_result.metrics.model_dump(),
+                    "judge_rationale_preview": _preview_text(eval_result.judge_rationale, 500),
+                },
+            },
+            "reflector": {
+                "input": {
+                    "enabled": reflector is not None,
+                    "reflector": payload.config.reflector.value,
+                    "llm_mode": retrieval_cfg.reflector_llm_mode.value,
+                    "memory_hit_count": len(search_result.hits),
+                    "latest_query": payload.input_text,
+                },
+                "output": reflector_result.model_dump() if reflector_result is not None else {"reflector": "None", "insights": [], "stats": {}},
+            },
+            "stm": {
+                "input": {
+                    "mode": retrieval_cfg.short_term_mode.value,
+                    "window_turns": retrieval_cfg.stm_window_turns,
+                    "token_budget": retrieval_cfg.stm_token_budget,
+                    "summary_keep_recent_turns": retrieval_cfg.stm_summary_keep_recent_turns,
+                },
+                "output": {
+                    "stm_hit_count": len(stm_hits),
+                    "stm_hits": _trace_hits(stm_hits),
+                },
+            },
+            "llm_calls": llm_calls,
+        }
+
         response = BenchmarkRunResponse(
             run_id=cur_run_id,
             config=payload.config,
@@ -416,6 +691,7 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             generated_response=agent_response,
             eval_result=eval_result,
             reflector_result=reflector_result,
+            module_trace=module_trace,
         )
         write_audit_event(
             "run_single_success",

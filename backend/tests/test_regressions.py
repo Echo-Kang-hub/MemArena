@@ -155,9 +155,15 @@ def test_api_prompt_contains_memory_user_and_assistant_partitions() -> None:
 
     resp = client.post("/api/benchmark/run", json=payload)
     assert resp.status_code == 200, resp.text
-    prompt = resp.json()["assemble_result"]["prompt"]
+    body = resp.json()
+    prompt = body["assemble_result"]["prompt"]
     assert "[MEMORY_USER]" in prompt
     assert "[MEMORY_ASSISTANT]" in prompt
+    assert "module_trace" in body
+    assert "processor" in body["module_trace"]
+    assert "assembler" in body["module_trace"]
+    assert "llm_calls" in body["module_trace"]
+    assert isinstance(body["module_trace"]["llm_calls"], list)
 
 
 def test_api_conflict_consolidator_reflector_with_independent_provider() -> None:
@@ -201,7 +207,42 @@ def test_api_conflict_consolidator_reflector_with_independent_provider() -> None
     reflector = body["reflector_result"]
     assert reflector is not None
     assert reflector["reflector"] == "ConflictConsolidator"
+    assert "module_trace" in body
+    assert "reflector" in body["module_trace"]
     stats = reflector.get("stats", {})
     assert stats.get("composition") == ["Consolidator", "ConflictResolver"]
     assert "memory_decision" in stats
     assert "proposed_resolutions" in stats
+
+
+def test_global_model_config_and_connectivity_endpoints() -> None:
+    client = TestClient(app)
+
+    get_resp = client.get("/api/config/global-models")
+    assert get_resp.status_code == 200, get_resp.text
+    body = get_resp.json()
+    assert "config" in body
+    assert "env_file" in body
+
+    update_payload = {
+        "config": {
+            **body["config"],
+            "chat_llm_provider": "local",
+            "judge_llm_provider": "local",
+            "reflector_llm_provider": "local",
+            "embedding_provider": "local",
+        }
+    }
+    post_resp = client.post("/api/config/global-models", json=update_payload)
+    assert post_resp.status_code == 200, post_resp.text
+
+    test_resp = client.post(
+        "/api/config/global-models/test",
+        json={"modules": ["chat", "judge", "reflector", "embedding"]},
+    )
+    assert test_resp.status_code == 200, test_resp.text
+    test_body = test_resp.json()
+    assert test_body["total"] == 4
+    assert isinstance(test_body["results"], list)
+    modules = {x["module"] for x in test_body["results"]}
+    assert {"chat", "judge", "reflector", "embedding"}.issubset(modules)

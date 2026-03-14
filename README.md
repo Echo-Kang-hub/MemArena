@@ -127,9 +127,17 @@ docker compose up --build
 - 三组可配置为不同 provider 与不同 base URL（例如 Chat 走 API 网关、Judge 走另一个评测网关）。
 - 若 `CHAT_*` / `EMBEDDING_*` / `JUDGE_*` 留空，会回退到兼容键（如 `OPENAI_*` / `OLLAMA_*` / `LOCAL_*`）。
 - 本地推理设备可用 `LOCAL_INFER_DEVICE=cpu|cuda` 设置默认值，前端也可按任务覆盖。
+- Reflector 独立路由键：`REFLECTOR_*`（provider/base_url/api_key/model/ollama/local）。
 - Chroma 相关：
   - `CHROMA_PERSIST_DIR` 为持久化目录。
   - `CHROMA_COLLECTION_NAME` 为默认集合名。
+
+### 前端全局大模型设置面板
+- 配置面板新增“全局大模型设置（写入 .env）”。
+- 前端会调用后端 API：
+  - `GET /api/config/global-models`：读取当前 .env 的模型配置。
+  - `POST /api/config/global-models`：保存配置并热更新后端运行时 settings。
+- 支持按模块独立配置：`Chat/Judge/Summarizer/Entity/Reflector/Embedding`。
 
 ## 运行数据与审计日志
 - 运行期数据统一放在项目根目录 `data/`，默认包括：

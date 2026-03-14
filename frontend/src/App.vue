@@ -5,16 +5,21 @@ import MetricBars from './components/MetricBars.vue';
 import {
   getAuditEventsByRun,
   getAsyncRunStatus,
+  getGlobalModelConfig,
   listDatasets,
   runBatchBenchmarkAsync,
   runBenchmarkWithTimeout,
-  runDatasetBenchmarkAsync
+  runDatasetBenchmarkAsync,
+  testGlobalModelConnectivity,
+  updateGlobalModelConfig,
 } from './api/client';
 import type {
   BatchBenchmarkRunResponse,
   BenchmarkConfig,
   BenchmarkRunResponse,
   DatasetSummary,
+  GlobalConnectivityTestResponse,
+  GlobalModelConfig,
   ReflectorLLMMode
 } from './types';
 
@@ -87,6 +92,61 @@ const entityDiagnosticCopyFeedback = ref('');
 const batchDiagnosticCopyFeedback = ref('');
 const elapsedMs = ref(0);
 const lastRunDurationMs = ref<number | null>(null);
+const globalConfigLoading = ref(false);
+const globalConfigSaving = ref(false);
+const globalConfigMessage = ref('');
+const globalConfigEnvFile = ref('');
+const globalConnectivityTesting = ref(false);
+const globalConnectivityMessage = ref('');
+const globalConnectivity = ref<GlobalConnectivityTestResponse | null>(null);
+const globalLastKnownGood = ref<Record<string, { at: string; snapshot: Record<string, string> }>>({});
+const globalModelConfig = ref<GlobalModelConfig>({
+  default_llm_provider: 'api',
+  default_embedding_provider: 'ollama',
+  chat_llm_provider: '',
+  chat_api_base_url: '',
+  chat_api_key: '',
+  chat_api_model: '',
+  chat_ollama_base_url: '',
+  chat_ollama_model: '',
+  chat_local_model_path: '',
+  judge_llm_provider: '',
+  judge_api_base_url: '',
+  judge_api_key: '',
+  judge_api_model: '',
+  judge_ollama_base_url: '',
+  judge_ollama_model: '',
+  judge_local_model_path: '',
+  summarizer_llm_provider: '',
+  summarizer_api_base_url: '',
+  summarizer_api_key: '',
+  summarizer_api_model: '',
+  summarizer_ollama_base_url: '',
+  summarizer_ollama_model: '',
+  summarizer_local_model_path: '',
+  entity_llm_provider: '',
+  entity_api_base_url: '',
+  entity_api_key: '',
+  entity_api_model: '',
+  entity_ollama_base_url: '',
+  entity_ollama_model: '',
+  entity_local_model_path: '',
+  reflector_llm_provider: '',
+  reflector_api_base_url: '',
+  reflector_api_key: '',
+  reflector_api_model: '',
+  reflector_ollama_base_url: '',
+  reflector_ollama_model: '',
+  reflector_local_model_path: '',
+  embedding_provider: '',
+  embedding_api_base_url: '',
+  embedding_api_key: '',
+  embedding_api_model: '',
+  embedding_ollama_base_url: '',
+  embedding_ollama_model: '',
+  embedding_local_model_path: '',
+  local_infer_device: 'cpu'
+});
 
 let timerHandle: ReturnType<typeof setInterval> | null = null;
 let runStartTs = 0;
@@ -131,6 +191,196 @@ const shortTermModes = [
   'RollingSummary',
   'WorkingMemoryBlackboard'
 ] as const;
+
+const GLOBAL_LAST_KNOWN_GOOD_STORAGE_KEY = 'memarena.globalModelLastKnownGood.v1';
+const KNOWN_GOOD_MODULES = ['chat', 'judge', 'summarizer', 'entity', 'reflector', 'embedding'] as const;
+type KnownGoodModule = (typeof KNOWN_GOOD_MODULES)[number];
+
+function loadLastKnownGoodSnapshots() {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(GLOBAL_LAST_KNOWN_GOOD_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      globalLastKnownGood.value = parsed as Record<string, { at: string; snapshot: Record<string, string> }>;
+    }
+  } catch {
+    // ignore local cache parsing issues
+  }
+}
+
+function persistLastKnownGoodSnapshots() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(GLOBAL_LAST_KNOWN_GOOD_STORAGE_KEY, JSON.stringify(globalLastKnownGood.value));
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
+function moduleSnapshot(moduleName: string): Record<string, string> {
+  const m = globalModelConfig.value;
+  if (moduleName === 'chat') {
+    return {
+      provider: m.chat_llm_provider,
+      api_base_url: m.chat_api_base_url,
+      api_model: m.chat_api_model,
+      ollama_base_url: m.chat_ollama_base_url,
+      ollama_model: m.chat_ollama_model,
+      local_model_path: m.chat_local_model_path,
+    };
+  }
+  if (moduleName === 'judge') {
+    return {
+      provider: m.judge_llm_provider,
+      api_base_url: m.judge_api_base_url,
+      api_model: m.judge_api_model,
+      ollama_base_url: m.judge_ollama_base_url,
+      ollama_model: m.judge_ollama_model,
+      local_model_path: m.judge_local_model_path,
+    };
+  }
+  if (moduleName === 'summarizer') {
+    return {
+      provider: m.summarizer_llm_provider,
+      api_base_url: m.summarizer_api_base_url,
+      api_model: m.summarizer_api_model,
+      ollama_base_url: m.summarizer_ollama_base_url,
+      ollama_model: m.summarizer_ollama_model,
+      local_model_path: m.summarizer_local_model_path,
+    };
+  }
+  if (moduleName === 'entity') {
+    return {
+      provider: m.entity_llm_provider,
+      api_base_url: m.entity_api_base_url,
+      api_model: m.entity_api_model,
+      ollama_base_url: m.entity_ollama_base_url,
+      ollama_model: m.entity_ollama_model,
+      local_model_path: m.entity_local_model_path,
+    };
+  }
+  if (moduleName === 'reflector') {
+    return {
+      provider: m.reflector_llm_provider,
+      api_base_url: m.reflector_api_base_url,
+      api_model: m.reflector_api_model,
+      ollama_base_url: m.reflector_ollama_base_url,
+      ollama_model: m.reflector_ollama_model,
+      local_model_path: m.reflector_local_model_path,
+    };
+  }
+  if (moduleName === 'embedding') {
+    return {
+      provider: m.embedding_provider,
+      api_base_url: m.embedding_api_base_url,
+      api_model: m.embedding_api_model,
+      ollama_base_url: m.embedding_ollama_base_url,
+      ollama_model: m.embedding_ollama_model,
+      local_model_path: m.embedding_local_model_path,
+      local_infer_device: m.local_infer_device,
+    };
+  }
+  return {};
+}
+
+function markModuleAsKnownGood(moduleName: string) {
+  globalLastKnownGood.value[moduleName] = {
+    at: new Date().toISOString(),
+    snapshot: moduleSnapshot(moduleName),
+  };
+}
+
+function applySnapshotToModule(moduleName: KnownGoodModule, snapshot: Record<string, string>) {
+  const m = globalModelConfig.value;
+  if (moduleName === 'chat') {
+    m.chat_llm_provider = snapshot.provider ?? m.chat_llm_provider;
+    m.chat_api_base_url = snapshot.api_base_url ?? m.chat_api_base_url;
+    m.chat_api_model = snapshot.api_model ?? m.chat_api_model;
+    m.chat_ollama_base_url = snapshot.ollama_base_url ?? m.chat_ollama_base_url;
+    m.chat_ollama_model = snapshot.ollama_model ?? m.chat_ollama_model;
+    m.chat_local_model_path = snapshot.local_model_path ?? m.chat_local_model_path;
+    return;
+  }
+  if (moduleName === 'judge') {
+    m.judge_llm_provider = snapshot.provider ?? m.judge_llm_provider;
+    m.judge_api_base_url = snapshot.api_base_url ?? m.judge_api_base_url;
+    m.judge_api_model = snapshot.api_model ?? m.judge_api_model;
+    m.judge_ollama_base_url = snapshot.ollama_base_url ?? m.judge_ollama_base_url;
+    m.judge_ollama_model = snapshot.ollama_model ?? m.judge_ollama_model;
+    m.judge_local_model_path = snapshot.local_model_path ?? m.judge_local_model_path;
+    return;
+  }
+  if (moduleName === 'summarizer') {
+    m.summarizer_llm_provider = snapshot.provider ?? m.summarizer_llm_provider;
+    m.summarizer_api_base_url = snapshot.api_base_url ?? m.summarizer_api_base_url;
+    m.summarizer_api_model = snapshot.api_model ?? m.summarizer_api_model;
+    m.summarizer_ollama_base_url = snapshot.ollama_base_url ?? m.summarizer_ollama_base_url;
+    m.summarizer_ollama_model = snapshot.ollama_model ?? m.summarizer_ollama_model;
+    m.summarizer_local_model_path = snapshot.local_model_path ?? m.summarizer_local_model_path;
+    return;
+  }
+  if (moduleName === 'entity') {
+    m.entity_llm_provider = snapshot.provider ?? m.entity_llm_provider;
+    m.entity_api_base_url = snapshot.api_base_url ?? m.entity_api_base_url;
+    m.entity_api_model = snapshot.api_model ?? m.entity_api_model;
+    m.entity_ollama_base_url = snapshot.ollama_base_url ?? m.entity_ollama_base_url;
+    m.entity_ollama_model = snapshot.ollama_model ?? m.entity_ollama_model;
+    m.entity_local_model_path = snapshot.local_model_path ?? m.entity_local_model_path;
+    return;
+  }
+  if (moduleName === 'reflector') {
+    m.reflector_llm_provider = snapshot.provider ?? m.reflector_llm_provider;
+    m.reflector_api_base_url = snapshot.api_base_url ?? m.reflector_api_base_url;
+    m.reflector_api_model = snapshot.api_model ?? m.reflector_api_model;
+    m.reflector_ollama_base_url = snapshot.ollama_base_url ?? m.reflector_ollama_base_url;
+    m.reflector_ollama_model = snapshot.ollama_model ?? m.reflector_ollama_model;
+    m.reflector_local_model_path = snapshot.local_model_path ?? m.reflector_local_model_path;
+    return;
+  }
+  m.embedding_provider = snapshot.provider ?? m.embedding_provider;
+  m.embedding_api_base_url = snapshot.api_base_url ?? m.embedding_api_base_url;
+  m.embedding_api_model = snapshot.api_model ?? m.embedding_api_model;
+  m.embedding_ollama_base_url = snapshot.ollama_base_url ?? m.embedding_ollama_base_url;
+  m.embedding_ollama_model = snapshot.ollama_model ?? m.embedding_ollama_model;
+  m.embedding_local_model_path = snapshot.local_model_path ?? m.embedding_local_model_path;
+  m.local_infer_device = snapshot.local_infer_device ?? m.local_infer_device;
+}
+
+function restoreModuleFromKnownGood(moduleName: KnownGoodModule) {
+  const item = globalLastKnownGood.value[moduleName];
+  if (!item || !item.snapshot) {
+    globalConfigMessage.value = `模块 ${moduleName} 暂无可恢复的最近可用配置。`;
+    return;
+  }
+  applySnapshotToModule(moduleName, item.snapshot);
+  globalConfigMessage.value = `已恢复 ${moduleName} 最近可用配置（请保存到 .env 并建议重测）。`;
+}
+
+function restoreAllFromKnownGood() {
+  let restored = 0;
+  KNOWN_GOOD_MODULES.forEach((moduleName) => {
+    const item = globalLastKnownGood.value[moduleName];
+    if (item?.snapshot) {
+      applySnapshotToModule(moduleName, item.snapshot);
+      restored += 1;
+    }
+  });
+  globalConfigMessage.value = restored > 0
+    ? `已恢复 ${restored} 个模块的最近可用配置（请保存到 .env 并建议重测）。`
+    : '暂无可恢复的最近可用配置。';
+}
+
+function knownGoodState(moduleName: string) {
+  const item = globalLastKnownGood.value[moduleName];
+  if (!item) {
+    return { exists: false, matched: false, at: '' };
+  }
+  const current = moduleSnapshot(moduleName);
+  const matched = JSON.stringify(current) === JSON.stringify(item.snapshot);
+  return { exists: true, matched, at: item.at };
+}
 
 const md = new MarkdownIt({
   html: false,
@@ -698,6 +948,110 @@ const singleRoleGroupedHits = computed(() => {
   return { stm, ltm };
 });
 
+function asPrettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+const singleModuleTraceJson = computed(() => asPrettyJson(result.value?.module_trace ?? {}));
+
+function moduleTraceMarkdownSection(trace: unknown): string {
+  return ['## Module Trace', '```json', asPrettyJson(trace), '```'].join('\n');
+}
+
+type PromptCheckRow = {
+  purpose: string;
+  provider: string;
+  model: string;
+  severity: 'ok' | 'warn' | 'error';
+  summary: string;
+  details: string;
+};
+
+function buildPromptQualityChecks(moduleTrace: Record<string, unknown> | undefined): PromptCheckRow[] {
+  const llmCalls = Array.isArray((moduleTrace as any)?.llm_calls) ? ((moduleTrace as any).llm_calls as Array<Record<string, unknown>>) : [];
+  const expectJson = (purpose: string) => {
+    const p = String(purpose || '');
+    return p === 'judge' || p.startsWith('entity_extract_') || p.startsWith('reflector_');
+  };
+
+  const checks: PromptCheckRow[] = [];
+  llmCalls.forEach((call) => {
+    const purpose = String(call.purpose || '');
+    const provider = String(call.provider || 'unknown');
+    const model = String(call.model || 'unknown');
+    const ok = Boolean(call.ok);
+    const promptPreview = String(call.prompt_preview || '');
+    const systemPreview = String(call.system_prompt_preview || '');
+    const promptLength = Number(call.prompt_length || 0);
+    const error = String(call.error || '');
+    const needsJson = expectJson(purpose);
+    const promptLower = (promptPreview + '\n' + systemPreview).toLowerCase();
+    const hasJsonConstraint = /json|输出\s*json|only valid json|strict json/.test(promptLower);
+
+    if (!ok) {
+      checks.push({
+        purpose,
+        provider,
+        model,
+        severity: 'error',
+        summary: 'LLM 调用失败',
+        details: error || 'unknown error'
+      });
+      return;
+    }
+
+    if (needsJson && !hasJsonConstraint) {
+      checks.push({
+        purpose,
+        provider,
+        model,
+        severity: 'warn',
+        summary: '疑似缺少 JSON 输出约束',
+        details: '该 purpose 下游通常按结构化结果消费，建议在 prompt 或 system prompt 明确 JSON schema。'
+      });
+    } else if (promptLength > 0 && promptLength < 40) {
+      checks.push({
+        purpose,
+        provider,
+        model,
+        severity: 'warn',
+        summary: 'Prompt 过短',
+        details: `prompt_length=${promptLength}，可能上下文不足导致输出不稳定。`
+      });
+    } else {
+      checks.push({
+        purpose,
+        provider,
+        model,
+        severity: 'ok',
+        summary: 'Prompt 检查通过',
+        details: `prompt_length=${promptLength}`
+      });
+    }
+  });
+
+  return checks;
+}
+
+const singlePromptQualityChecks = computed(() => {
+  const trace = (result.value?.module_trace ?? {}) as Record<string, unknown>;
+  return buildPromptQualityChecks(trace);
+});
+
+function promptChecksMarkdownSection(rows: PromptCheckRow[]): string {
+  if (!rows.length) {
+    return ['## Prompt Quality Checks', '- (none)'].join('\n');
+  }
+  return [
+    '## Prompt Quality Checks',
+    ...rows.map((r, i) => `- [${i + 1}] ${r.severity.toUpperCase()} | ${r.purpose} | ${r.provider}/${r.model} | ${r.summary} | ${r.details}`)
+  ].join('\n');
+}
+
 const markdownReport = computed(() => {
   const formatRoleLines = (
     hits: Array<{ content: string; relevance: number; metadata?: Record<string, unknown> }>,
@@ -755,6 +1109,10 @@ const markdownReport = computed(() => {
       ltmAssistantLines,
       '### Other',
       ltmOtherLines,
+      '',
+      moduleTraceMarkdownSection(r.module_trace ?? {}),
+      '',
+      promptChecksMarkdownSection(singlePromptQualityChecks.value),
       '',
       '## Metrics',
       `- precision: ${r.eval_result.metrics.precision}`,
@@ -829,6 +1187,12 @@ const markdownReport = computed(() => {
           ltmAssistant,
           '  - Other:',
           ltmOther,
+          '#### Module Trace',
+          '```json',
+          asPrettyJson(c.module_trace ?? {}),
+          '```',
+          '#### Prompt Quality Checks',
+          ...promptChecksMarkdownSection(buildPromptQualityChecks((c.module_trace ?? {}) as Record<string, unknown>)).split('\n').slice(1),
           '- Metrics:',
           `  - precision: ${c.eval_result.metrics.precision}`,
           `  - faithfulness: ${c.eval_result.metrics.faithfulness}`,
@@ -910,6 +1274,64 @@ async function loadBuiltinDatasets() {
 }
 
 loadBuiltinDatasets();
+
+async function loadGlobalModelConfigPanel() {
+  globalConfigLoading.value = true;
+  globalConfigMessage.value = '';
+  try {
+    const resp = await getGlobalModelConfig(requestTimeoutMs.value);
+    globalModelConfig.value = { ...resp.config };
+    globalConfigEnvFile.value = resp.env_file;
+  } catch {
+    globalConfigMessage.value = '加载全局模型配置失败，请检查后端服务。';
+  } finally {
+    globalConfigLoading.value = false;
+  }
+}
+
+async function saveGlobalModelConfigPanel() {
+  globalConfigSaving.value = true;
+  globalConfigMessage.value = '';
+  try {
+    const resp = await updateGlobalModelConfig(globalModelConfig.value, requestTimeoutMs.value);
+    globalModelConfig.value = { ...resp.config };
+    globalConfigEnvFile.value = resp.env_file;
+    globalConfigMessage.value = '全局模型配置已保存到 .env（新请求将使用最新配置）。';
+  } catch {
+    globalConfigMessage.value = '保存失败，请检查输入格式与后端服务。';
+  } finally {
+    globalConfigSaving.value = false;
+  }
+}
+
+const defaultConnectivityModules = [...KNOWN_GOOD_MODULES];
+
+async function runGlobalConnectivityTest(modules: string[] = defaultConnectivityModules) {
+  globalConnectivityTesting.value = true;
+  globalConnectivityMessage.value = '';
+  try {
+    const resp = await testGlobalModelConnectivity(modules, requestTimeoutMs.value);
+    globalConnectivity.value = resp;
+    resp.results.forEach((row) => {
+      if (row.ok) {
+        markModuleAsKnownGood(String(row.module || '').toLowerCase());
+      }
+    });
+    persistLastKnownGoodSnapshots();
+    globalConnectivityMessage.value = `连通性测试完成：${resp.passed}/${resp.total} 通过。`;
+  } catch {
+    globalConnectivityMessage.value = '连通性测试失败，请检查后端服务与网络。';
+  } finally {
+    globalConnectivityTesting.value = false;
+  }
+}
+
+function connectivityResult(moduleName: string) {
+  return globalConnectivity.value?.results?.find((x) => String(x.module || '').toLowerCase() === moduleName.toLowerCase()) || null;
+}
+
+loadGlobalModelConfigPanel();
+loadLastKnownGoodSnapshots();
 
 function handleDatasetUpload(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
@@ -1250,8 +1672,192 @@ function downloadCsvReport() {
             </select>
           </label>
 
-          <div v-if="config.engine === 'VectorEngine'" class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
-            <p class="mb-2 text-xs font-semibold text-arena-mint">Vector Retrieval Params (Chroma)</p>
+          <div class="global-config-panel mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <div class="mb-2 flex items-center justify-between">
+              <p class="text-xs font-semibold text-arena-mint">全局大模型设置（写入 .env）</p>
+              <div class="flex items-center gap-2">
+                <button
+                  class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100 transition hover:border-slate-300"
+                  :disabled="globalConfigLoading"
+                  @click="loadGlobalModelConfigPanel"
+                >
+                  {{ globalConfigLoading ? '加载中...' : '刷新' }}
+                </button>
+                <button
+                  class="rounded border border-arena-cyan/60 bg-arena-cyan/20 px-2 py-1 text-[11px] text-arena-mint transition hover:border-arena-cyan"
+                  :disabled="globalConnectivityTesting"
+                  @click="runGlobalConnectivityTest()"
+                >
+                  {{ globalConnectivityTesting ? '测试中...' : '一键测试连通性' }}
+                </button>
+                <button
+                  class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200 transition hover:border-emerald-300"
+                  @click="restoreAllFromKnownGood()"
+                >
+                  恢复全部最近可用
+                </button>
+              </div>
+            </div>
+            <p class="mb-2 break-all text-[11px] text-slate-400">{{ globalConfigEnvFile || '.env' }}</p>
+            <p v-if="globalConnectivityMessage" class="mb-2 text-[11px] text-slate-300">{{ globalConnectivityMessage }}</p>
+
+            <div class="global-default-provider-grid">
+              <label class="field global-default-provider-field">
+                <span class="global-default-provider-label">DEFAULT_LLM_PROVIDER</span>
+                <input v-model="globalModelConfig.default_llm_provider" type="text" class="select" />
+              </label>
+              <label class="field global-default-provider-field">
+                <span class="global-default-provider-label">DEFAULT_EMBEDDING_PROVIDER</span>
+                <input v-model="globalModelConfig.default_embedding_provider" type="text" class="select" />
+              </label>
+            </div>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2" open>
+              <summary class="cursor-pointer text-xs text-slate-200">Chat</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['chat'])">测试 Chat</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('chat').exists" @click="restoreModuleFromKnownGood('chat')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('chat')" class="mt-1 text-[11px]" :class="connectivityResult('chat')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('chat')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('chat')?.provider }}/{{ connectivityResult('chat')?.model }} | {{ connectivityResult('chat')?.error || connectivityResult('chat')?.note }}
+              </p>
+              <p v-if="knownGoodState('chat').exists" class="mt-1 text-[11px]" :class="knownGoodState('chat').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('chat').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('chat').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                <label class="field"><span>CHAT_LLM_PROVIDER</span><input v-model="globalModelConfig.chat_llm_provider" type="text" class="select" /></label>
+                <label class="field"><span>CHAT_API_MODEL</span><input v-model="globalModelConfig.chat_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>CHAT_API_BASE_URL</span><input v-model="globalModelConfig.chat_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>CHAT_API_KEY</span><input v-model="globalModelConfig.chat_api_key" type="password" class="select" /></label>
+                <label class="field"><span>CHAT_OLLAMA_BASE_URL</span><input v-model="globalModelConfig.chat_ollama_base_url" type="text" class="select" /></label>
+                <label class="field"><span>CHAT_OLLAMA_MODEL</span><input v-model="globalModelConfig.chat_ollama_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>CHAT_LOCAL_MODEL_PATH</span><input v-model="globalModelConfig.chat_local_model_path" type="text" class="select" /></label>
+              </div>
+            </details>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2">
+              <summary class="cursor-pointer text-xs text-slate-200">Judge</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['judge'])">测试 Judge</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('judge').exists" @click="restoreModuleFromKnownGood('judge')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('judge')" class="mt-1 text-[11px]" :class="connectivityResult('judge')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('judge')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('judge')?.provider }}/{{ connectivityResult('judge')?.model }} | {{ connectivityResult('judge')?.error || connectivityResult('judge')?.note }}
+              </p>
+              <p v-if="knownGoodState('judge').exists" class="mt-1 text-[11px]" :class="knownGoodState('judge').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('judge').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('judge').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                <label class="field"><span>JUDGE_LLM_PROVIDER</span><input v-model="globalModelConfig.judge_llm_provider" type="text" class="select" /></label>
+                <label class="field"><span>JUDGE_API_MODEL</span><input v-model="globalModelConfig.judge_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>JUDGE_API_BASE_URL</span><input v-model="globalModelConfig.judge_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>JUDGE_API_KEY</span><input v-model="globalModelConfig.judge_api_key" type="password" class="select" /></label>
+                <label class="field"><span>JUDGE_OLLAMA_BASE_URL</span><input v-model="globalModelConfig.judge_ollama_base_url" type="text" class="select" /></label>
+                <label class="field"><span>JUDGE_OLLAMA_MODEL</span><input v-model="globalModelConfig.judge_ollama_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>JUDGE_LOCAL_MODEL_PATH</span><input v-model="globalModelConfig.judge_local_model_path" type="text" class="select" /></label>
+              </div>
+            </details>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2">
+              <summary class="cursor-pointer text-xs text-slate-200">Summarizer</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['summarizer'])">测试 Summarizer</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('summarizer').exists" @click="restoreModuleFromKnownGood('summarizer')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('summarizer')" class="mt-1 text-[11px]" :class="connectivityResult('summarizer')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('summarizer')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('summarizer')?.provider }}/{{ connectivityResult('summarizer')?.model }} | {{ connectivityResult('summarizer')?.error || connectivityResult('summarizer')?.note }}
+              </p>
+              <p v-if="knownGoodState('summarizer').exists" class="mt-1 text-[11px]" :class="knownGoodState('summarizer').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('summarizer').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('summarizer').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                <label class="field"><span>SUMMARIZER_LLM_PROVIDER</span><input v-model="globalModelConfig.summarizer_llm_provider" type="text" class="select" /></label>
+                <label class="field"><span>SUMMARIZER_API_MODEL</span><input v-model="globalModelConfig.summarizer_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>SUMMARIZER_API_BASE_URL</span><input v-model="globalModelConfig.summarizer_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>SUMMARIZER_API_KEY</span><input v-model="globalModelConfig.summarizer_api_key" type="password" class="select" /></label>
+              </div>
+            </details>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2">
+              <summary class="cursor-pointer text-xs text-slate-200">Entity</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['entity'])">测试 Entity</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('entity').exists" @click="restoreModuleFromKnownGood('entity')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('entity')" class="mt-1 text-[11px]" :class="connectivityResult('entity')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('entity')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('entity')?.provider }}/{{ connectivityResult('entity')?.model }} | {{ connectivityResult('entity')?.error || connectivityResult('entity')?.note }}
+              </p>
+              <p v-if="knownGoodState('entity').exists" class="mt-1 text-[11px]" :class="knownGoodState('entity').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('entity').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('entity').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+
+                <label class="field"><span>ENTITY_LLM_PROVIDER</span><input v-model="globalModelConfig.entity_llm_provider" type="text" class="select" /></label>
+                <label class="field"><span>ENTITY_API_MODEL</span><input v-model="globalModelConfig.entity_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>ENTITY_API_BASE_URL</span><input v-model="globalModelConfig.entity_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>ENTITY_API_KEY</span><input v-model="globalModelConfig.entity_api_key" type="password" class="select" /></label>
+              </div>
+            </details>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2">
+              <summary class="cursor-pointer text-xs text-slate-200">Reflector</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['reflector'])">测试 Reflector</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('reflector').exists" @click="restoreModuleFromKnownGood('reflector')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('reflector')" class="mt-1 text-[11px]" :class="connectivityResult('reflector')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('reflector')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('reflector')?.provider }}/{{ connectivityResult('reflector')?.model }} | {{ connectivityResult('reflector')?.error || connectivityResult('reflector')?.note }}
+              </p>
+              <p v-if="knownGoodState('reflector').exists" class="mt-1 text-[11px]" :class="knownGoodState('reflector').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('reflector').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('reflector').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+
+                <label class="field"><span>REFLECTOR_LLM_PROVIDER</span><input v-model="globalModelConfig.reflector_llm_provider" type="text" class="select" /></label>
+                <label class="field"><span>REFLECTOR_API_MODEL</span><input v-model="globalModelConfig.reflector_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>REFLECTOR_API_BASE_URL</span><input v-model="globalModelConfig.reflector_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>REFLECTOR_API_KEY</span><input v-model="globalModelConfig.reflector_api_key" type="password" class="select" /></label>
+              </div>
+            </details>
+
+            <details class="mt-2 rounded border border-slate-700/60 bg-slate-900/40 p-2">
+              <summary class="cursor-pointer text-xs text-slate-200">Embedding / Local Device</summary>
+              <div class="mt-2 flex items-center justify-end gap-2">
+                <button class="rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-100" :disabled="globalConnectivityTesting" @click="runGlobalConnectivityTest(['embedding'])">测试 Embedding</button>
+                <button class="rounded border border-emerald-500/60 bg-emerald-900/30 px-2 py-1 text-[11px] text-emerald-200" :disabled="!knownGoodState('embedding').exists" @click="restoreModuleFromKnownGood('embedding')">恢复最近可用</button>
+              </div>
+              <p v-if="connectivityResult('embedding')" class="mt-1 text-[11px]" :class="connectivityResult('embedding')?.ok ? 'text-emerald-300' : 'text-red-300'">
+                {{ connectivityResult('embedding')?.ok ? '可用' : '不可用' }} | {{ connectivityResult('embedding')?.provider }}/{{ connectivityResult('embedding')?.model }} | {{ connectivityResult('embedding')?.error || connectivityResult('embedding')?.note }}
+              </p>
+              <p v-if="knownGoodState('embedding').exists" class="mt-1 text-[11px]" :class="knownGoodState('embedding').matched ? 'text-emerald-300' : 'text-arena-amber'">
+                最近可用配置：{{ knownGoodState('embedding').matched ? '与当前一致' : '已变更（建议重测）' }} | {{ knownGoodState('embedding').at }}
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-2 lg:grid-cols-2">
+                <label class="field"><span>EMBEDDING_PROVIDER</span><input v-model="globalModelConfig.embedding_provider" type="text" class="select" /></label>
+                <label class="field"><span>EMBEDDING_API_MODEL</span><input v-model="globalModelConfig.embedding_api_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>EMBEDDING_API_BASE_URL</span><input v-model="globalModelConfig.embedding_api_base_url" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>EMBEDDING_API_KEY</span><input v-model="globalModelConfig.embedding_api_key" type="password" class="select" /></label>
+                <label class="field"><span>EMBEDDING_OLLAMA_BASE_URL</span><input v-model="globalModelConfig.embedding_ollama_base_url" type="text" class="select" /></label>
+                <label class="field"><span>EMBEDDING_OLLAMA_MODEL</span><input v-model="globalModelConfig.embedding_ollama_model" type="text" class="select" /></label>
+                <label class="field lg:col-span-2"><span>EMBEDDING_LOCAL_MODEL_PATH</span><input v-model="globalModelConfig.embedding_local_model_path" type="text" class="select" /></label>
+                <label class="field"><span>LOCAL_INFER_DEVICE</span><input v-model="globalModelConfig.local_infer_device" type="text" class="select" /></label>
+              </div>
+            </details>
+
+            <div class="mt-2 flex items-center gap-2">
+              <button
+                class="rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900"
+                :disabled="globalConfigSaving"
+                @click="saveGlobalModelConfigPanel"
+              >
+                {{ globalConfigSaving ? '保存中...' : '保存到 .env' }}
+              </button>
+              <span v-if="globalConfigMessage" class="text-[11px] text-slate-300">{{ globalConfigMessage }}</span>
+            </div>
+          </div>
+
+          <details v-if="config.engine === 'VectorEngine'" class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <summary class="cursor-pointer text-xs font-semibold text-arena-mint">Vector Retrieval Params (Chroma)</summary>
             <label class="field">
               <span>Top K</span>
               <input v-model.number="retrievalTopK" type="number" min="1" max="50" class="select" />
@@ -1276,10 +1882,10 @@ function downloadCsvReport() {
               <input v-model="keywordRerank" type="checkbox" />
               <span>Enable Keyword Rerank (0.3 blend)</span>
             </label>
-          </div>
+          </details>
 
-          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
-            <p class="mb-2 text-xs font-semibold text-arena-mint">Context Assembly Params</p>
+          <details class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <summary class="cursor-pointer text-xs font-semibold text-arena-mint">Context Assembly Params</summary>
             <label class="field">
               <span>Max Context Tokens (RankedPruning)</span>
               <input v-model.number="maxContextTokens" type="number" min="64" max="8192" class="select" />
@@ -1288,10 +1894,10 @@ function downloadCsvReport() {
               <span>Reasoning Hops (ReasoningChain + GraphEngine)</span>
               <input v-model.number="reasoningHops" type="number" min="1" max="3" class="select" />
             </label>
-          </div>
+          </details>
 
-          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
-            <p class="mb-2 text-xs font-semibold text-arena-mint">Short-term Memory Params</p>
+          <details class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <summary class="cursor-pointer text-xs font-semibold text-arena-mint">Short-term Memory Params</summary>
             <label class="field">
               <span>Short-term Mode</span>
               <select v-model="shortTermMode" class="select">
@@ -1313,10 +1919,10 @@ function downloadCsvReport() {
             <p class="mt-2 text-xs text-slate-400">
               LTM 负责长期检索；STM 负责最近上下文焦点，二者会在后端合并排序后再交给 Assembler。
             </p>
-          </div>
+          </details>
 
-          <div class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
-            <p class="mb-2 text-xs font-semibold text-arena-mint">Reflector Writeback</p>
+          <details class="mt-2 rounded-lg border border-slate-600/60 bg-slate-900/40 p-3">
+            <summary class="cursor-pointer text-xs font-semibold text-arena-mint">Reflector Writeback</summary>
             <label class="field">
               <span>Reflector LLM Mode</span>
               <select v-model="reflectorLlmMode" class="select">
@@ -1341,7 +1947,7 @@ function downloadCsvReport() {
             <p class="mt-2 text-xs text-slate-400">
               自动写回会向会话写入控制块，用于抑制被裁决为过时的冲突值检索分数；建议仅在纠错场景开启。
             </p>
-          </div>
+          </details>
         </div>
       </section>
 
@@ -1519,6 +2125,44 @@ function downloadCsvReport() {
             <pre class="max-h-60 overflow-auto text-xs text-slate-200">{{ result.assemble_result.prompt }}</pre>
           </div>
 
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Module IO Trace</h3>
+            <p class="mb-2 text-[11px] text-slate-400">
+              逐模块输入输出追踪（Processor/Engine/Assembler/Chat/Eval/Reflector/STM/LLM Calls），用于快速定位异常模块。
+            </p>
+            <pre class="max-h-72 overflow-auto text-xs text-slate-200">{{ singleModuleTraceJson }}</pre>
+          </div>
+
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Prompt Quality Checks</h3>
+            <ul class="space-y-2 text-xs text-slate-200">
+              <li
+                v-for="(row, idx) in singlePromptQualityChecks"
+                :key="`prompt-check-${idx}-${row.purpose}`"
+                class="rounded border border-slate-700/60 bg-slate-900/40 p-2"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-semibold">{{ row.purpose }} | {{ row.provider }}/{{ row.model }}</span>
+                  <span
+                    class="rounded px-2 py-0.5 text-[10px] font-semibold"
+                    :class="
+                      row.severity === 'error'
+                        ? 'bg-red-500/20 text-red-200'
+                        : row.severity === 'warn'
+                        ? 'bg-arena-amber/20 text-arena-amber'
+                        : 'bg-emerald-500/20 text-emerald-200'
+                    "
+                  >
+                    {{ row.severity.toUpperCase() }}
+                  </span>
+                </div>
+                <p class="mt-1">{{ row.summary }}</p>
+                <p class="mt-1 text-[11px] text-slate-400">{{ row.details }}</p>
+              </li>
+              <li v-if="singlePromptQualityChecks.length === 0" class="text-slate-400">(none)</li>
+            </ul>
+          </div>
+
           <div v-if="singleRoleGroupedHits" class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Retrieved Memory by Role</h3>
             <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -1664,6 +2308,33 @@ function downloadCsvReport() {
             </button>
             <p v-if="batchDiagnosticCopyFeedback" class="mt-2 text-xs text-slate-300">{{ batchDiagnosticCopyFeedback }}</p>
           </div>
+
+          <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
+            <h3 class="mb-2 text-sm font-semibold text-arena-mint">Case Module IO Trace</h3>
+            <div class="space-y-2">
+              <details
+                v-for="(c, idx) in batchResult.case_results"
+                :key="`case-trace-${idx}-${c.run_id}`"
+                class="rounded border border-slate-700/60 bg-slate-900/40 p-2"
+              >
+                <summary class="cursor-pointer text-xs text-slate-200">Case {{ idx + 1 }} | run_id={{ c.run_id }}</summary>
+                <pre class="mt-2 max-h-60 overflow-auto text-xs text-slate-300">{{ asPrettyJson(c.module_trace || {}) }}</pre>
+                <div class="mt-2 rounded border border-slate-700/60 bg-slate-900/30 p-2">
+                  <p class="text-xs font-semibold text-arena-mint">Prompt Quality Checks</p>
+                  <ul class="mt-1 space-y-1 text-[11px] text-slate-300">
+                    <li
+                      v-for="(row, ridx) in buildPromptQualityChecks((c.module_trace || {}) as Record<string, unknown>)"
+                      :key="`case-prompt-check-${idx}-${ridx}-${row.purpose}`"
+                    >
+                      [{{ row.severity.toUpperCase() }}] {{ row.purpose }} | {{ row.provider }}/{{ row.model }} | {{ row.summary }}
+                    </li>
+                    <li v-if="buildPromptQualityChecks((c.module_trace || {}) as Record<string, unknown>).length === 0" class="text-slate-500">(none)</li>
+                  </ul>
+                </div>
+              </details>
+            </div>
+          </div>
+
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Markdown Report Preview</h3>
             <div class="markdown-preview max-h-64 overflow-auto" v-html="renderedMarkdownReport"></div>

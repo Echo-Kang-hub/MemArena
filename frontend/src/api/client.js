@@ -54,4 +54,18 @@ export async function getAuditEventsByRun(runId, limit = 300, timeoutMs) {
     });
     return data;
 }
+export async function getGlobalModelConfig(timeoutMs) {
+    const { data } = await client.get('/api/config/global-models', {
+        timeout: timeoutMs ?? 30000,
+    });
+    return data;
+}
+export async function updateGlobalModelConfig(config, timeoutMs) {
+    const { data } = await client.post('/api/config/global-models', { config }, { timeout: timeoutMs ?? 30000 });
+    return data;
+}
+export async function testGlobalModelConnectivity(modules, timeoutMs) {
+    const { data } = await client.post('/api/config/global-models/test', { modules }, { timeout: timeoutMs ?? 30000 });
+    return data;
+}
 //# sourceMappingURL=client.js.map

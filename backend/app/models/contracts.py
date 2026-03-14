@@ -246,6 +246,7 @@ class BenchmarkRunResponse(BaseModel):
     generated_response: str = ""
     eval_result: EvalResult
     reflector_result: ReflectResult | None = None
+    module_trace: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchCase(BaseModel):
@@ -294,3 +295,89 @@ class AsyncRunStatusResponse(BaseModel):
     total: int
     message: str = ""
     result: BatchBenchmarkRunResponse | None = None
+
+
+class GlobalModelConfig(BaseModel):
+    default_llm_provider: str = ""
+    default_embedding_provider: str = ""
+
+    chat_llm_provider: str = ""
+    chat_api_base_url: str = ""
+    chat_api_key: str = ""
+    chat_api_model: str = ""
+    chat_ollama_base_url: str = ""
+    chat_ollama_model: str = ""
+    chat_local_model_path: str = ""
+
+    judge_llm_provider: str = ""
+    judge_api_base_url: str = ""
+    judge_api_key: str = ""
+    judge_api_model: str = ""
+    judge_ollama_base_url: str = ""
+    judge_ollama_model: str = ""
+    judge_local_model_path: str = ""
+
+    summarizer_llm_provider: str = ""
+    summarizer_api_base_url: str = ""
+    summarizer_api_key: str = ""
+    summarizer_api_model: str = ""
+    summarizer_ollama_base_url: str = ""
+    summarizer_ollama_model: str = ""
+    summarizer_local_model_path: str = ""
+
+    entity_llm_provider: str = ""
+    entity_api_base_url: str = ""
+    entity_api_key: str = ""
+    entity_api_model: str = ""
+    entity_ollama_base_url: str = ""
+    entity_ollama_model: str = ""
+    entity_local_model_path: str = ""
+
+    reflector_llm_provider: str = ""
+    reflector_api_base_url: str = ""
+    reflector_api_key: str = ""
+    reflector_api_model: str = ""
+    reflector_ollama_base_url: str = ""
+    reflector_ollama_model: str = ""
+    reflector_local_model_path: str = ""
+
+    embedding_provider: str = ""
+    embedding_api_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_api_model: str = ""
+    embedding_ollama_base_url: str = ""
+    embedding_ollama_model: str = ""
+    embedding_local_model_path: str = ""
+    local_infer_device: str = ""
+
+
+class GlobalModelConfigResponse(BaseModel):
+    config: GlobalModelConfig
+    env_file: str
+
+
+class GlobalModelConfigUpdateRequest(BaseModel):
+    config: GlobalModelConfig
+
+
+class GlobalModelConnectivityTestRequest(BaseModel):
+    modules: list[str] = Field(default_factory=lambda: ["chat", "judge", "summarizer", "entity", "reflector", "embedding"])
+
+
+class GlobalModelConnectivityItem(BaseModel):
+    module: str
+    kind: str
+    provider: str
+    model: str
+    endpoint: str
+    ok: bool
+    note: str = ""
+    error: str = ""
+    output_preview: str = ""
+
+
+class GlobalModelConnectivityTestResponse(BaseModel):
+    tested_modules: list[str]
+    passed: int
+    total: int
+    results: list[GlobalModelConnectivityItem]

@@ -32,13 +32,29 @@ body {
 }
 
 .field {
-  @apply grid gap-1 text-sm text-slate-200;
+  @apply grid gap-1 text-sm text-slate-200 min-w-0;
 }
 
 .select,
 .textarea,
 .input-file {
-  @apply w-full rounded-lg border border-slate-600 bg-slate-900/70 p-2 text-sm text-slate-100 outline-none ring-arena-cyan transition focus:ring;
+  @apply w-full min-w-0 rounded-lg border border-slate-600 bg-slate-900/70 p-2 text-sm text-slate-100 outline-none ring-arena-cyan transition focus:ring;
+}
+
+.global-config-panel .field > span {
+  @apply text-[11px] leading-tight break-all;
+}
+
+.global-default-provider-grid {
+  @apply grid grid-cols-1 gap-2 sm:grid-cols-2;
+}
+
+.global-default-provider-field {
+  @apply min-w-0;
+}
+
+.global-default-provider-label {
+  @apply block min-h-[2rem] break-all;
 }
 
 .run-btn {

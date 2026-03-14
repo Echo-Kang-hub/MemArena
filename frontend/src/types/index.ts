@@ -99,6 +99,7 @@ export interface BenchmarkRunResponse {
     judge_rationale: string;
     raw_judge_output?: string | null;
   };
+  module_trace?: Record<string, unknown>;
   search_result: {
     hits: Array<{
       content: string;
@@ -173,4 +174,76 @@ export interface AsyncRunStatusResponse {
   total: number;
   message: string;
   result?: BatchBenchmarkRunResponse | null;
+}
+
+export interface GlobalModelConfig {
+  default_llm_provider: string;
+  default_embedding_provider: string;
+  chat_llm_provider: string;
+  chat_api_base_url: string;
+  chat_api_key: string;
+  chat_api_model: string;
+  chat_ollama_base_url: string;
+  chat_ollama_model: string;
+  chat_local_model_path: string;
+  judge_llm_provider: string;
+  judge_api_base_url: string;
+  judge_api_key: string;
+  judge_api_model: string;
+  judge_ollama_base_url: string;
+  judge_ollama_model: string;
+  judge_local_model_path: string;
+  summarizer_llm_provider: string;
+  summarizer_api_base_url: string;
+  summarizer_api_key: string;
+  summarizer_api_model: string;
+  summarizer_ollama_base_url: string;
+  summarizer_ollama_model: string;
+  summarizer_local_model_path: string;
+  entity_llm_provider: string;
+  entity_api_base_url: string;
+  entity_api_key: string;
+  entity_api_model: string;
+  entity_ollama_base_url: string;
+  entity_ollama_model: string;
+  entity_local_model_path: string;
+  reflector_llm_provider: string;
+  reflector_api_base_url: string;
+  reflector_api_key: string;
+  reflector_api_model: string;
+  reflector_ollama_base_url: string;
+  reflector_ollama_model: string;
+  reflector_local_model_path: string;
+  embedding_provider: string;
+  embedding_api_base_url: string;
+  embedding_api_key: string;
+  embedding_api_model: string;
+  embedding_ollama_base_url: string;
+  embedding_ollama_model: string;
+  embedding_local_model_path: string;
+  local_infer_device: string;
+}
+
+export interface GlobalModelConfigResponse {
+  config: GlobalModelConfig;
+  env_file: string;
+}
+
+export interface GlobalConnectivityItem {
+  module: string;
+  kind: string;
+  provider: string;
+  model: string;
+  endpoint: string;
+  ok: boolean;
+  note: string;
+  error: string;
+  output_preview: string;
+}
+
+export interface GlobalConnectivityTestResponse {
+  tested_modules: string[];
+  passed: number;
+  total: number;
+  results: GlobalConnectivityItem[];
 }

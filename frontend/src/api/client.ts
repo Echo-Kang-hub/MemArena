@@ -7,7 +7,10 @@ import type {
   DatasetRunRequest,
   DatasetSummary,
   BenchmarkRunRequest,
-  BenchmarkRunResponse
+  BenchmarkRunResponse,
+  GlobalModelConfig,
+  GlobalModelConfigResponse,
+  GlobalConnectivityTestResponse,
 } from '../types';
 
 const client = axios.create({
@@ -87,6 +90,37 @@ export async function getAuditEventsByRun(
       params: { limit },
       timeout: timeoutMs ?? 30000
     }
+  );
+  return data;
+}
+
+export async function getGlobalModelConfig(timeoutMs?: number): Promise<GlobalModelConfigResponse> {
+  const { data } = await client.get<GlobalModelConfigResponse>('/api/config/global-models', {
+    timeout: timeoutMs ?? 30000,
+  });
+  return data;
+}
+
+export async function updateGlobalModelConfig(
+  config: GlobalModelConfig,
+  timeoutMs?: number,
+): Promise<GlobalModelConfigResponse> {
+  const { data } = await client.post<GlobalModelConfigResponse>(
+    '/api/config/global-models',
+    { config },
+    { timeout: timeoutMs ?? 30000 },
+  );
+  return data;
+}
+
+export async function testGlobalModelConnectivity(
+  modules: string[],
+  timeoutMs?: number,
+): Promise<GlobalConnectivityTestResponse> {
+  const { data } = await client.post<GlobalConnectivityTestResponse>(
+    '/api/config/global-models/test',
+    { modules },
+    { timeout: timeoutMs ?? 30000 },
   );
   return data;
 }
