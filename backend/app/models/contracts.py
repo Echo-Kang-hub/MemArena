@@ -38,6 +38,18 @@ class ProviderType(str, Enum):
     local = "local"
 
 
+class SummarizerMethod(str, Enum):
+    llm = "llm"
+    kmeans = "kmeans"
+
+
+class EntityExtractorMethod(str, Enum):
+    llm_triple = "llm_triple"
+    llm_attribute = "llm_attribute"
+    spacy_llm_triple = "spacy_llm_triple"
+    spacy_llm_attribute = "spacy_llm_attribute"
+
+
 # 原始输入（单条对话）
 class RawConversationInput(BaseModel):
     session_id: str = Field(..., description="会话唯一标识")
@@ -160,7 +172,11 @@ class BenchmarkConfig(BaseModel):
     llm_provider: ProviderType = ProviderType.api
     chat_llm_provider: ProviderType | None = None
     judge_llm_provider: ProviderType | None = None
+    summarizer_llm_provider: ProviderType | None = None
+    entity_llm_provider: ProviderType | None = None
     embedding_provider: ProviderType
+    summarizer_method: SummarizerMethod = SummarizerMethod.llm
+    entity_extractor_method: EntityExtractorMethod = EntityExtractorMethod.llm_triple
     compute_device: str = Field(default="cpu", pattern="^(cpu|cuda)$")
 
 

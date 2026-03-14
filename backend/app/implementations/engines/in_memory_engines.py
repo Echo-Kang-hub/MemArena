@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 import math
 import re
+import threading
+import time
 from typing import Any
 
 import chromadb
@@ -43,14 +45,44 @@ class _BaseInMemoryEngine(MemoryEngine):
 
 
 class VectorEngine(MemoryEngine):
+    _collection_lock = threading.Lock()
+
     def __init__(self, embedding_client: Any, collection_name: str | None = None) -> None:
         self.embedding_client = embedding_client
         self.engine_type = EngineType.vector_engine
-        self.client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
         self.collection_name = collection_name or settings.chroma_collection_name
+        self.client = self._new_client()
+        # Warm up tenant/collection state to reduce first-run race failures.
+        self._get_collection(self.collection_name)
+
+    def _new_client(self):
+        return chromadb.PersistentClient(path=settings.chroma_persist_dir)
+
+    def _is_transient_tenant_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "could not connect to tenant" in msg or "default_tenant" in msg
+
+    def _run_chroma_with_retry(self, fn):
+        attempts = 3
+        for idx in range(attempts):
+            try:
+                return fn()
+            except Exception as exc:
+                is_last = idx == attempts - 1
+                if not self._is_transient_tenant_error(exc) or is_last:
+                    raise
+                time.sleep(0.25 * (idx + 1))
+                self.client = self._new_client()
+
+    def _get_collection(self, name: str):
+        def create_or_get():
+            return self.client.get_or_create_collection(name=name, metadata={"hnsw:space": "cosine"})
+
+        with self._collection_lock:
+            return self._run_chroma_with_retry(create_or_get)
 
     def _collection(self):
-        return self.client.get_or_create_collection(name=self.collection_name, metadata={"hnsw:space": "cosine"})
+        return self._get_collection(self.collection_name)
 
     def _tokenize(self, text: str) -> set[str]:
         compact = text.strip().lower()
@@ -90,7 +122,9 @@ class VectorEngine(MemoryEngine):
             )
 
         try:
-            collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+            self._run_chroma_with_retry(
+                lambda: collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+            )
         except Exception as exc:
             err = str(exc)
             if "dimension" in err.lower():
@@ -111,13 +145,15 @@ class VectorEngine(MemoryEngine):
         min_relevance = float(request.filters.get("min_relevance", 0.0))
         similarity_strategy = str(request.filters.get("similarity_strategy", "inverse_distance"))
         keyword_rerank = bool(request.filters.get("keyword_rerank", False))
-        collection = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
+        collection = self._get_collection(collection_name)
 
         query_embedding = self.embedding_client.embed(request.query)
-        result = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=request.top_k,
-            where={"session_id": request.session_id},
+        result = self._run_chroma_with_retry(
+            lambda: collection.query(
+                query_embeddings=[query_embedding],
+                n_results=request.top_k,
+                where={"session_id": request.session_id},
+            )
         )
 
         ids = result.get("ids", [[]])[0]

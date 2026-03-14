@@ -25,6 +25,8 @@ from app.models.contracts import (
     EvalMetrics,
     EngineSaveRequest,
     EngineSearchRequest,
+    EngineType,
+    EntityExtractorMethod,
     EvalRequest,
     ProcessorType,
     RawConversationInput,
@@ -51,6 +53,20 @@ def _auto_collection_name(base_name: str, embedding_provider: str, embedding_mod
     compact_provider = re.sub(r"[^a-z0-9]+", "_", embedding_provider.lower()).strip("_") or "provider"
     return f"{base_name}_{compact_provider}_{compact_model}"
 
+
+def _validate_processor_engine_mapping(payload: BenchmarkRunRequest) -> None:
+    if payload.config.processor != ProcessorType.entity_extractor:
+        return
+
+    method = payload.config.entity_extractor_method
+    if method in {EntityExtractorMethod.llm_triple, EntityExtractorMethod.spacy_llm_triple}:
+        if payload.config.engine != EngineType.graph_engine:
+            raise ValueError("EntityExtractor triple modes require engine=GraphEngine")
+        return
+
+    if payload.config.engine != EngineType.relational_engine:
+        raise ValueError("EntityExtractor attribute modes require engine=RelationalEngine")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin, "http://localhost:5173", "http://127.0.0.1:5173"],
@@ -69,6 +85,13 @@ def health() -> dict[str, str]:
 def options() -> dict:
     return {
         "processors": [item.value for item in ProcessorType],
+        "summarizer_methods": ["llm", "kmeans"],
+        "entity_extractor_methods": [
+            "llm_triple",
+            "llm_attribute",
+            "spacy_llm_triple",
+            "spacy_llm_attribute",
+        ],
         "engines": ["VectorEngine", "GraphEngine", "RelationalEngine"],
         "assemblers": ["SystemInjector", "XMLTagging", "TimelineRollover"],
         "reflectors": ["None", "GenerativeReflection", "ConflictResolver"],
@@ -97,6 +120,8 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
             "effective_provider_routing": {
                 "chat": str(payload.config.chat_llm_provider or payload.config.llm_provider),
                 "judge": str(payload.config.judge_llm_provider or payload.config.llm_provider),
+                "summarizer": str(payload.config.summarizer_llm_provider or payload.config.llm_provider),
+                "entity": str(payload.config.entity_llm_provider or payload.config.llm_provider),
                 "embedding": str(payload.config.embedding_provider),
                 "compute_device": payload.config.compute_device,
             },
@@ -106,12 +131,18 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
 
     try:
         # 初始化模型工厂，用于引擎检索和 LLM-as-a-Judge
+        _validate_processor_engine_mapping(payload)
+
         chat_provider = payload.config.chat_llm_provider or payload.config.llm_provider
         judge_provider = payload.config.judge_llm_provider or payload.config.llm_provider
+        summarizer_provider = payload.config.summarizer_llm_provider or payload.config.llm_provider
+        entity_provider = payload.config.entity_llm_provider or payload.config.llm_provider
         compute_device = payload.config.compute_device
 
         llm_client = ProviderFactory.build_chat_llm(chat_provider, compute_device)
         judge_llm_client = ProviderFactory.build_judge_llm(judge_provider, compute_device)
+        summarizer_llm_client = ProviderFactory.build_summarizer_llm(summarizer_provider, compute_device)
+        entity_llm_client = ProviderFactory.build_entity_llm(entity_provider, compute_device)
         embedding_client = ProviderFactory.build_embedding(payload.config.embedding_provider, compute_device)
 
         effective_collection_name = payload.retrieval.collection_name
@@ -134,7 +165,13 @@ async def _execute_single(payload: BenchmarkRunRequest, run_id: str | None = Non
 
         retrieval_cfg = payload.retrieval.model_copy(update={"collection_name": effective_collection_name})
 
-        processor = build_processor(payload.config.processor)
+        processor = build_processor(
+            payload.config.processor,
+            summarizer_method=payload.config.summarizer_method,
+            entity_extractor_method=payload.config.entity_extractor_method,
+            summarizer_llm_client=summarizer_llm_client,
+            entity_llm_client=entity_llm_client,
+        )
         engine = build_engine(
             payload.config.engine,
             embedding_client=embedding_client,

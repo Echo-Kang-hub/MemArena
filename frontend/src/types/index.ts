@@ -1,5 +1,11 @@
 export type ProviderType = 'api' | 'ollama' | 'local';
 export type ComputeDevice = 'cpu' | 'cuda';
+export type SummarizerMethod = 'llm' | 'kmeans';
+export type EntityExtractorMethod =
+  | 'llm_triple'
+  | 'llm_attribute'
+  | 'spacy_llm_triple'
+  | 'spacy_llm_attribute';
 
 export interface BenchmarkConfig {
   processor: 'RawLogger' | 'Summarizer' | 'EntityExtractor';
@@ -9,7 +15,11 @@ export interface BenchmarkConfig {
   llm_provider: ProviderType;
   chat_llm_provider?: ProviderType;
   judge_llm_provider?: ProviderType;
+  summarizer_llm_provider?: ProviderType;
+  entity_llm_provider?: ProviderType;
   embedding_provider: ProviderType;
+  summarizer_method?: SummarizerMethod;
+  entity_extractor_method?: EntityExtractorMethod;
   compute_device?: ComputeDevice;
 }
 

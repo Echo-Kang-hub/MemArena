@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
+import MarkdownIt from 'markdown-it';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import MetricBars from './components/MetricBars.vue';
 import {
   getAsyncRunStatus,
@@ -23,7 +24,11 @@ const config = ref<BenchmarkConfig>({
   llm_provider: 'api',
   chat_llm_provider: 'api',
   judge_llm_provider: 'api',
+  summarizer_llm_provider: 'api',
+  entity_llm_provider: 'api',
   embedding_provider: 'ollama',
+  summarizer_method: 'llm',
+  entity_extractor_method: 'llm_triple',
   compute_device: 'cpu'
 });
 
@@ -61,7 +66,15 @@ const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'] as const;
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'] as const;
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'] as const;
 const providers = ['api', 'ollama', 'local'] as const;
+const summarizerMethods = ['llm', 'kmeans'] as const;
+const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'] as const;
 const computeDevices = ['cpu', 'cuda'] as const;
+
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true
+});
 
 const usingUploadedBatchCases = computed(() => datasetCases.value.length > 0);
 const plannedBatchCaseCount = computed(() => {
@@ -73,6 +86,26 @@ const plannedBatchCaseCount = computed(() => {
 const batchInputModeLabel = computed(() =>
   usingUploadedBatchCases.value ? 'JSON 上传测试集模式' : '单条输入自动生成模式'
 );
+const isSummarizerProcessor = computed(() => config.value.processor === 'Summarizer');
+const isEntityExtractorProcessor = computed(() => config.value.processor === 'EntityExtractor');
+
+const isEntityTripleMode = computed(() => {
+  const method = config.value.entity_extractor_method;
+  return method === 'llm_triple' || method === 'spacy_llm_triple';
+});
+
+function normalizeEntityEngineMapping() {
+  if (!isEntityExtractorProcessor.value) return;
+  config.value.engine = isEntityTripleMode.value ? 'GraphEngine' : 'RelationalEngine';
+}
+
+watch(() => config.value.processor, () => {
+  normalizeEntityEngineMapping();
+});
+
+watch(() => config.value.entity_extractor_method, () => {
+  normalizeEntityEngineMapping();
+});
 
 function startRunTimer() {
   stopRunTimer();
@@ -432,6 +465,13 @@ const markdownReport = computed(() => {
   return '';
 });
 
+const renderedMarkdownReport = computed(() => {
+  if (!markdownReport.value.trim()) {
+    return '';
+  }
+  return md.render(markdownReport.value);
+});
+
 function downloadMarkdownReport() {
   if (!markdownReport.value) return;
   const blob = new Blob([markdownReport.value], { type: 'text/markdown;charset=utf-8;' });
@@ -499,6 +539,8 @@ async function onRunBenchmark() {
   startRunTimer();
 
   try {
+    normalizeEntityEngineMapping();
+
     const expectedFacts = expectedFactsRaw.value
       .split('\n')
       .map((v: string) => v.trim())
@@ -536,6 +578,8 @@ async function onRunBatchBenchmark() {
   startRunTimer();
 
   try {
+    normalizeEntityEngineMapping();
+
     const expectedFacts = expectedFactsRaw.value
       .split('\n')
       .map((v: string) => v.trim())
@@ -605,6 +649,8 @@ async function onRunBuiltinDataset() {
   startRunTimer();
 
   try {
+    normalizeEntityEngineMapping();
+
     if (!selectedDatasetName.value) {
       throw new Error('请先选择内置数据集。');
     }
@@ -680,12 +726,28 @@ function downloadCsvReport() {
               <option v-for="x in processors" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
+          <label v-if="isSummarizerProcessor" class="field">
+            <span>Summarizer Method</span>
+            <select v-model="config.summarizer_method" class="select">
+              <option v-for="x in summarizerMethods" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
+          <label v-if="isEntityExtractorProcessor" class="field">
+            <span>EntityExtractor Method</span>
+            <select v-model="config.entity_extractor_method" class="select">
+              <option v-for="x in entityExtractorMethods" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
           <label class="field">
             <span>Engine</span>
             <select v-model="config.engine" class="select">
               <option v-for="x in engines" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
+          <p v-if="isEntityExtractorProcessor" class="rounded-lg border border-slate-700/70 bg-slate-900/50 p-2 text-xs text-slate-300">
+            EntityExtractor 自动映射引擎：
+            <span class="font-semibold text-arena-mint">{{ isEntityTripleMode ? 'Triple -> GraphEngine' : 'Attribute -> RelationalEngine' }}</span>
+          </p>
           <label class="field">
             <span>Assembler</span>
             <select v-model="config.assembler" class="select">
@@ -707,6 +769,18 @@ function downloadCsvReport() {
           <label class="field">
             <span>Judge LLM Provider</span>
             <select v-model="config.judge_llm_provider" class="select">
+              <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
+          <label v-if="isSummarizerProcessor" class="field">
+            <span>Summarizer LLM Provider</span>
+            <select v-model="config.summarizer_llm_provider" class="select">
+              <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
+            </select>
+          </label>
+          <label v-if="isEntityExtractorProcessor" class="field">
+            <span>Entity LLM Provider</span>
+            <select v-model="config.entity_llm_provider" class="select">
               <option v-for="x in providers" :key="x" :value="x">{{ x }}</option>
             </select>
           </label>
@@ -907,7 +981,7 @@ function downloadCsvReport() {
 
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Markdown Report Preview</h3>
-            <pre class="max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{{ markdownReport }}</pre>
+            <div class="markdown-preview max-h-64 overflow-auto" v-html="renderedMarkdownReport"></div>
             <button class="mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" @click="downloadMarkdownReport">
               Download .md Report
             </button>
@@ -967,7 +1041,7 @@ function downloadCsvReport() {
           </div>
           <div class="rounded-xl border border-slate-600/60 bg-slate-900/60 p-3">
             <h3 class="mb-2 text-sm font-semibold text-arena-mint">Markdown Report Preview</h3>
-            <pre class="max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{{ markdownReport }}</pre>
+            <div class="markdown-preview max-h-64 overflow-auto" v-html="renderedMarkdownReport"></div>
           </div>
         </div>
 

@@ -16,13 +16,20 @@ from app.implementations.processors.basic_processors import (
 )
 from app.implementations.reflectors.basic_reflectors import ConflictResolverReflector, GenerativeReflectionReflector
 from app.models.contracts import AssemblerType, EngineType, ProcessorType, ReflectorType
+from app.models.contracts import EntityExtractorMethod, SummarizerMethod
 
 
-def build_processor(kind: ProcessorType) -> MemoryProcessor:
+def build_processor(
+    kind: ProcessorType,
+    summarizer_method: SummarizerMethod = SummarizerMethod.llm,
+    entity_extractor_method: EntityExtractorMethod = EntityExtractorMethod.llm_triple,
+    summarizer_llm_client: Any | None = None,
+    entity_llm_client: Any | None = None,
+) -> MemoryProcessor:
     mapping: dict[ProcessorType, MemoryProcessor] = {
         ProcessorType.raw_logger: RawLoggerProcessor(),
-        ProcessorType.summarizer: SummarizerProcessor(),
-        ProcessorType.entity_extractor: EntityExtractorProcessor(),
+        ProcessorType.summarizer: SummarizerProcessor(method=summarizer_method, llm_client=summarizer_llm_client),
+        ProcessorType.entity_extractor: EntityExtractorProcessor(method=entity_extractor_method, llm_client=entity_llm_client),
     }
     return mapping[kind]
 

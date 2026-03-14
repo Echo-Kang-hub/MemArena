@@ -41,6 +41,22 @@ class Settings(BaseSettings):
     judge_ollama_model: str = ""
     judge_local_model_path: str = ""
 
+    summarizer_llm_provider: str = ""
+    summarizer_api_base_url: str = ""
+    summarizer_api_key: str = ""
+    summarizer_api_model: str = ""
+    summarizer_ollama_base_url: str = ""
+    summarizer_ollama_model: str = ""
+    summarizer_local_model_path: str = ""
+
+    entity_llm_provider: str = ""
+    entity_api_base_url: str = ""
+    entity_api_key: str = ""
+    entity_api_model: str = ""
+    entity_ollama_base_url: str = ""
+    entity_ollama_model: str = ""
+    entity_local_model_path: str = ""
+
     embedding_provider: str = ""
     embedding_api_base_url: str = ""
     embedding_api_key: str = ""

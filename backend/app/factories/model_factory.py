@@ -263,6 +263,17 @@ class ProviderFactory:
         return ProviderFactory._build_function_llm("judge", provider_override, compute_device)
 
     @staticmethod
+    def build_summarizer_llm(
+        provider_override: ProviderType | None = None,
+        compute_device: str | None = None,
+    ) -> LLMClient:
+        return ProviderFactory._build_function_llm("summarizer", provider_override, compute_device)
+
+    @staticmethod
+    def build_entity_llm(provider_override: ProviderType | None = None, compute_device: str | None = None) -> LLMClient:
+        return ProviderFactory._build_function_llm("entity", provider_override, compute_device)
+
+    @staticmethod
     def build_llm(provider: ProviderType) -> LLMClient:
         # 兼容旧调用，默认等价于按 chat 功能构建。
         return ProviderFactory.build_chat_llm(provider_override=provider)

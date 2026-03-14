@@ -45,6 +45,45 @@ body {
   @apply rounded-xl bg-arena-cyan px-4 py-2 font-semibold text-slate-900 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60;
 }
 
+.markdown-preview {
+  @apply rounded-lg border border-slate-700/60 bg-slate-950/60 p-3 text-xs leading-6 text-slate-100;
+}
+
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3 {
+  @apply mt-3 font-semibold text-arena-mint;
+}
+
+.markdown-preview h1 {
+  @apply text-base;
+}
+
+.markdown-preview h2 {
+  @apply text-sm;
+}
+
+.markdown-preview h3 {
+  @apply text-xs;
+}
+
+.markdown-preview ul {
+  @apply ml-4 list-disc;
+}
+
+.markdown-preview p,
+.markdown-preview li {
+  @apply text-xs text-slate-100;
+}
+
+.markdown-preview code {
+  @apply rounded bg-slate-800/80 px-1 py-0.5 text-[11px] text-arena-amber;
+}
+
+.markdown-preview pre {
+  @apply overflow-auto rounded bg-slate-900/90 p-2;
+}
+
 @keyframes panel-in {
   from {
     opacity: 0;

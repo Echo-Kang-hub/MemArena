@@ -1,4 +1,5 @@
-import { computed, onBeforeUnmount, ref } from 'vue';
+import MarkdownIt from 'markdown-it';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import MetricBars from './components/MetricBars.vue';
 import { getAsyncRunStatus, listDatasets, runBatchBenchmarkAsync, runBenchmarkWithTimeout, runDatasetBenchmarkAsync } from './api/client';
 const config = ref({
@@ -9,7 +10,11 @@ const config = ref({
     llm_provider: 'api',
     chat_llm_provider: 'api',
     judge_llm_provider: 'api',
+    summarizer_llm_provider: 'api',
+    entity_llm_provider: 'api',
     embedding_provider: 'ollama',
+    summarizer_method: 'llm',
+    entity_extractor_method: 'llm_triple',
     compute_device: 'cpu'
 });
 const inputText = ref('我下周要去上海出差，记得提醒我带护照和会议材料。');
@@ -44,7 +49,14 @@ const engines = ['VectorEngine', 'GraphEngine', 'RelationalEngine'];
 const assemblers = ['SystemInjector', 'XMLTagging', 'TimelineRollover'];
 const reflectors = ['None', 'GenerativeReflection', 'ConflictResolver'];
 const providers = ['api', 'ollama', 'local'];
+const summarizerMethods = ['llm', 'kmeans'];
+const entityExtractorMethods = ['llm_triple', 'llm_attribute', 'spacy_llm_triple', 'spacy_llm_attribute'];
 const computeDevices = ['cpu', 'cuda'];
+const md = new MarkdownIt({
+    html: false,
+    linkify: true,
+    breaks: true
+});
 const usingUploadedBatchCases = computed(() => datasetCases.value.length > 0);
 const plannedBatchCaseCount = computed(() => {
     if (usingUploadedBatchCases.value) {
@@ -53,6 +65,23 @@ const plannedBatchCaseCount = computed(() => {
     return Math.max(1, Math.min(200, Number(batchCaseCount.value) || 1));
 });
 const batchInputModeLabel = computed(() => usingUploadedBatchCases.value ? 'JSON 上传测试集模式' : '单条输入自动生成模式');
+const isSummarizerProcessor = computed(() => config.value.processor === 'Summarizer');
+const isEntityExtractorProcessor = computed(() => config.value.processor === 'EntityExtractor');
+const isEntityTripleMode = computed(() => {
+    const method = config.value.entity_extractor_method;
+    return method === 'llm_triple' || method === 'spacy_llm_triple';
+});
+function normalizeEntityEngineMapping() {
+    if (!isEntityExtractorProcessor.value)
+        return;
+    config.value.engine = isEntityTripleMode.value ? 'GraphEngine' : 'RelationalEngine';
+}
+watch(() => config.value.processor, () => {
+    normalizeEntityEngineMapping();
+});
+watch(() => config.value.entity_extractor_method, () => {
+    normalizeEntityEngineMapping();
+});
 function startRunTimer() {
     stopRunTimer();
     runStartTs = Date.now();
@@ -382,6 +411,12 @@ const markdownReport = computed(() => {
     }
     return '';
 });
+const renderedMarkdownReport = computed(() => {
+    if (!markdownReport.value.trim()) {
+        return '';
+    }
+    return md.render(markdownReport.value);
+});
 function downloadMarkdownReport() {
     if (!markdownReport.value)
         return;
@@ -447,6 +482,7 @@ async function onRunBenchmark() {
     lastRunDurationMs.value = null;
     startRunTimer();
     try {
+        normalizeEntityEngineMapping();
         const expectedFacts = expectedFactsRaw.value
             .split('\n')
             .map((v) => v.trim())
@@ -483,6 +519,7 @@ async function onRunBatchBenchmark() {
     lastRunDurationMs.value = null;
     startRunTimer();
     try {
+        normalizeEntityEngineMapping();
         const expectedFacts = expectedFactsRaw.value
             .split('\n')
             .map((v) => v.trim())
@@ -545,6 +582,7 @@ async function onRunBuiltinDataset() {
     lastRunDurationMs.value = null;
     startRunTimer();
     try {
+        normalizeEntityEngineMapping();
         if (!selectedDatasetName.value) {
             throw new Error('请先选择内置数据集。');
         }
@@ -638,6 +676,40 @@ for (const [x] of __VLS_getVForSourceType((__VLS_ctx.processors))) {
     });
     (x);
 }
+if (__VLS_ctx.isSummarizerProcessor) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.config.summarizer_method),
+        ...{ class: "select" },
+    });
+    for (const [x] of __VLS_getVForSourceType((__VLS_ctx.summarizerMethods))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (x),
+            value: (x),
+        });
+        (x);
+    }
+}
+if (__VLS_ctx.isEntityExtractorProcessor) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.config.entity_extractor_method),
+        ...{ class: "select" },
+    });
+    for (const [x] of __VLS_getVForSourceType((__VLS_ctx.entityExtractorMethods))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (x),
+            value: (x),
+        });
+        (x);
+    }
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "field" },
 });
@@ -652,6 +724,15 @@ for (const [x] of __VLS_getVForSourceType((__VLS_ctx.engines))) {
         value: (x),
     });
     (x);
+}
+if (__VLS_ctx.isEntityExtractorProcessor) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "rounded-lg border border-slate-700/70 bg-slate-900/50 p-2 text-xs text-slate-300" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "font-semibold text-arena-mint" },
+    });
+    (__VLS_ctx.isEntityTripleMode ? 'Triple -> GraphEngine' : 'Attribute -> RelationalEngine');
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "field" },
@@ -712,6 +793,40 @@ for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
         value: (x),
     });
     (x);
+}
+if (__VLS_ctx.isSummarizerProcessor) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.config.summarizer_llm_provider),
+        ...{ class: "select" },
+    });
+    for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (x),
+            value: (x),
+        });
+        (x);
+    }
+}
+if (__VLS_ctx.isEntityExtractorProcessor) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.config.entity_llm_provider),
+        ...{ class: "select" },
+    });
+    for (const [x] of __VLS_getVForSourceType((__VLS_ctx.providers))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (x),
+            value: (x),
+        });
+        (x);
+    }
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "field" },
@@ -1117,10 +1232,10 @@ if (__VLS_ctx.result) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({
         ...{ class: "mb-2 text-sm font-semibold text-arena-mint" },
     });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
-        ...{ class: "max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200" },
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "markdown-preview max-h-64 overflow-auto" },
     });
-    (__VLS_ctx.markdownReport);
+    __VLS_asFunctionalDirective(__VLS_directives.vHtml)(null, { ...__VLS_directiveBindingRestFields, value: (__VLS_ctx.renderedMarkdownReport) }, null, null);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.downloadMarkdownReport) },
         ...{ class: "mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" },
@@ -1240,10 +1355,10 @@ else if (__VLS_ctx.batchResult) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({
         ...{ class: "mb-2 text-sm font-semibold text-arena-mint" },
     });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
-        ...{ class: "max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-200" },
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "markdown-preview max-h-64 overflow-auto" },
     });
-    (__VLS_ctx.markdownReport);
+    __VLS_asFunctionalDirective(__VLS_directives.vHtml)(null, { ...__VLS_directiveBindingRestFields, value: (__VLS_ctx.renderedMarkdownReport) }, null, null);
 }
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -1266,6 +1381,23 @@ else {
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['field']} */ ;
+/** @type {__VLS_StyleScopedClasses['select']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-700/70']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/50']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
 /** @type {__VLS_StyleScopedClasses['select']} */ ;
 /** @type {__VLS_StyleScopedClasses['field']} */ ;
@@ -1539,11 +1671,9 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['markdown-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['max-h-64']} */ ;
 /** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
-/** @type {__VLS_StyleScopedClasses['whitespace-pre-wrap']} */ ;
-/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
-/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
 /** @type {__VLS_StyleScopedClasses['bg-arena-amber']} */ ;
@@ -1667,11 +1797,9 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-arena-mint']} */ ;
+/** @type {__VLS_StyleScopedClasses['markdown-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['max-h-64']} */ ;
 /** @type {__VLS_StyleScopedClasses['overflow-auto']} */ ;
-/** @type {__VLS_StyleScopedClasses['whitespace-pre-wrap']} */ ;
-/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
-/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-dashed']} */ ;
@@ -1712,9 +1840,14 @@ const __VLS_self = (await import('vue')).defineComponent({
             assemblers: assemblers,
             reflectors: reflectors,
             providers: providers,
+            summarizerMethods: summarizerMethods,
+            entityExtractorMethods: entityExtractorMethods,
             computeDevices: computeDevices,
             plannedBatchCaseCount: plannedBatchCaseCount,
             batchInputModeLabel: batchInputModeLabel,
+            isSummarizerProcessor: isSummarizerProcessor,
+            isEntityExtractorProcessor: isEntityExtractorProcessor,
+            isEntityTripleMode: isEntityTripleMode,
             runningDurationLabel: runningDurationLabel,
             finishedDurationLabel: finishedDurationLabel,
             singleDerivedRows: singleDerivedRows,
@@ -1722,7 +1855,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             singleSafetySignals: singleSafetySignals,
             batchSafetySignals: batchSafetySignals,
             batchSafetyInterpretation: batchSafetyInterpretation,
-            markdownReport: markdownReport,
+            renderedMarkdownReport: renderedMarkdownReport,
             downloadMarkdownReport: downloadMarkdownReport,
             handleDatasetUpload: handleDatasetUpload,
             onRunBenchmark: onRunBenchmark,

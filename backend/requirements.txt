@@ -1,0 +1,13 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+pydantic-settings>=2.3.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+chromadb>=1.0.12
+scikit-learn>=1.5.0
+spacy>=3.7.0
+# Keep spaCy/thinc binary compatibility stable on Windows
+numpy<2
+# Preinstall default spaCy pipeline model
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
