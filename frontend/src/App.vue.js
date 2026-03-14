@@ -1,7 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import MetricBars from './components/MetricBars.vue';
-import { getAsyncRunStatus, listDatasets, runBatchBenchmarkAsync, runBenchmarkWithTimeout, runDatasetBenchmarkAsync } from './api/client';
+import { getAuditEventsByRun, getAsyncRunStatus, listDatasets, runBatchBenchmarkAsync, runBenchmarkWithTimeout, runDatasetBenchmarkAsync } from './api/client';
 const config = ref({
     processor: 'RawLogger',
     engine: 'VectorEngine',
@@ -40,6 +40,9 @@ const batchCaseCount = ref(5);
 const requestTimeoutMs = ref(120000);
 const includeRawJudgeInMarkdown = ref(false);
 const progressText = ref('');
+const entityHealthState = ref(null);
+const entityDiagnosticCopyFeedback = ref('');
+const batchDiagnosticCopyFeedback = ref('');
 const elapsedMs = ref(0);
 const lastRunDurationMs = ref(null);
 let timerHandle = null;
@@ -82,6 +85,128 @@ watch(() => config.value.processor, () => {
 watch(() => config.value.entity_extractor_method, () => {
     normalizeEntityEngineMapping();
 });
+function clearEntityHealthWarning() {
+    entityHealthState.value = null;
+    entityDiagnosticCopyFeedback.value = '';
+}
+async function copyEntityDiagnostic() {
+    if (!entityHealthState.value) {
+        return;
+    }
+    const lines = [
+        `[Entity Health] level=${entityHealthState.value.level}`,
+        entityHealthState.value.message,
+        entityHealthState.value.details,
+        '',
+        'Recent failures:'
+    ];
+    entityHealthState.value.recentFailures.forEach((evt, idx) => {
+        lines.push(`${idx + 1}. ${evt.ts} | ${evt.purpose} | ${evt.provider}/${evt.model} | status=${evt.status}`, `   ${evt.error}`);
+    });
+    const text = lines.join('\n');
+    try {
+        await navigator.clipboard.writeText(text);
+        entityDiagnosticCopyFeedback.value = '诊断信息已复制到剪贴板';
+    }
+    catch {
+        entityDiagnosticCopyFeedback.value = '复制失败，请手动复制下方失败事件';
+    }
+}
+async function copyBatchDiagnostic() {
+    if (!batchResult.value) {
+        return;
+    }
+    const m = batchResult.value.avg_metrics;
+    const lines = [
+        `[Batch Diagnostic] run_id=${batchResult.value.run_id}`,
+        `cases=${batchResult.value.case_results.length}`,
+        `avg_precision=${m.precision}`,
+        `avg_faithfulness=${m.faithfulness}`,
+        `avg_info_loss=${m.info_loss}`,
+        `avg_recall_at_k=${m.recall_at_k ?? 'N/A'}`,
+        `avg_qa_accuracy=${m.qa_accuracy ?? 'N/A'}`,
+        `avg_qa_f1=${m.qa_f1 ?? 'N/A'}`,
+        `avg_consistency_score=${m.consistency_score ?? 'N/A'}`,
+        `avg_rejection_rate=${m.rejection_rate ?? 'N/A'}`,
+        `avg_rejection_correctness_unknown=${m.rejection_correctness_unknown ?? 'N/A'}`
+    ];
+    if (entityHealthState.value) {
+        lines.push('', '[Entity Health]', `level=${entityHealthState.value.level}`, entityHealthState.value.message, entityHealthState.value.details, '', 'Recent failures:');
+        entityHealthState.value.recentFailures.forEach((evt, idx) => {
+            lines.push(`${idx + 1}. ${evt.ts} | ${evt.purpose} | ${evt.provider}/${evt.model} | status=${evt.status}`, `   ${evt.error}`);
+        });
+    }
+    try {
+        await navigator.clipboard.writeText(lines.join('\n'));
+        batchDiagnosticCopyFeedback.value = '批量诊断信息已复制到剪贴板';
+    }
+    catch {
+        batchDiagnosticCopyFeedback.value = '复制失败，请手动复制当前批次摘要';
+    }
+}
+async function refreshEntityHealthWarning(runId) {
+    if (config.value.processor !== 'EntityExtractor') {
+        clearEntityHealthWarning();
+        return;
+    }
+    try {
+        const audit = await getAuditEventsByRun(runId, 500, requestTimeoutMs.value);
+        const events = Array.isArray(audit.events) ? audit.events : [];
+        const entityEvents = events.filter((evt) => {
+            const eventType = String(evt?.event_type || '');
+            const purpose = String(evt?.purpose || '');
+            return eventType === 'llm_generate' && purpose.startsWith('entity_extract_');
+        });
+        const failed = entityEvents.filter((evt) => evt?.ok === false);
+        if (failed.length === 0) {
+            clearEntityHealthWarning();
+            return;
+        }
+        const latestFailed = failed[failed.length - 1];
+        const latestError = String(latestFailed?.error || 'unknown error');
+        const has401Or429 = failed.some((evt) => {
+            const errorText = String(evt?.error || '');
+            return errorText.includes('401') || errorText.includes('429');
+        });
+        const provider = String(latestFailed?.provider || 'unknown');
+        const model = String(latestFailed?.model || 'unknown');
+        const purpose = String(latestFailed?.purpose || 'unknown');
+        const statusMatch = latestError.match(/\b(401|429|4\d\d|5\d\d)\b/);
+        const statusCode = statusMatch ? statusMatch[1] : 'unknown';
+        const recentFailures = failed
+            .slice(-3)
+            .reverse()
+            .map((evt) => {
+            const errorText = String(evt?.error || 'unknown error');
+            const statusHit = errorText.match(/\b(401|429|4\d\d|5\d\d)\b/);
+            return {
+                ts: String(evt?.ts || '-'),
+                provider: String(evt?.provider || 'unknown'),
+                model: String(evt?.model || 'unknown'),
+                purpose: String(evt?.purpose || 'unknown'),
+                status: statusHit ? statusHit[1] : 'unknown',
+                error: errorText.split('\n')[0]
+            };
+        });
+        const details = `provider=${provider} | model=${model} | purpose=${purpose} | status=${statusCode}`;
+        entityHealthState.value = has401Or429
+            ? {
+                level: 'warning',
+                message: 'Entity LLM 调用出现 401/429，系统已自动降级为启发式结构化抽取（结果可用，但质量上限受限）。',
+                details,
+                recentFailures
+            }
+            : {
+                level: 'info',
+                message: '检测到 Entity LLM 调用异常，系统已自动降级为启发式结构化抽取。',
+                details,
+                recentFailures
+            };
+    }
+    catch {
+        // 审计接口不可用时不阻断主流程
+    }
+}
 function startRunTimer() {
     stopRunTimer();
     runStartTs = Date.now();
@@ -478,6 +603,7 @@ async function onRunBenchmark() {
     loading.value = true;
     error.value = '';
     batchResult.value = null;
+    clearEntityHealthWarning();
     progressText.value = '';
     lastRunDurationMs.value = null;
     startRunTimer();
@@ -501,6 +627,9 @@ async function onRunBenchmark() {
                 keyword_rerank: keywordRerank.value
             }
         }, requestTimeoutMs.value);
+        if (result.value?.run_id) {
+            await refreshEntityHealthWarning(result.value.run_id);
+        }
     }
     catch (e) {
         error.value = e instanceof Error ? e.message : '运行失败，请检查后端服务。';
@@ -515,6 +644,7 @@ async function onRunBatchBenchmark() {
     loading.value = true;
     error.value = '';
     result.value = null;
+    clearEntityHealthWarning();
     progressText.value = '';
     lastRunDurationMs.value = null;
     startRunTimer();
@@ -557,6 +687,9 @@ async function onRunBatchBenchmark() {
             progressText.value = `Batch Progress: ${status.completed}/${status.total} (${status.status})`;
             if (status.status === 'completed' && status.result) {
                 batchResult.value = status.result;
+                if (status.result.run_id) {
+                    await refreshEntityHealthWarning(status.result.run_id);
+                }
                 break;
             }
             if (status.status === 'failed' || status.status === 'not_found') {
@@ -578,6 +711,7 @@ async function onRunBuiltinDataset() {
     loading.value = true;
     error.value = '';
     result.value = null;
+    clearEntityHealthWarning();
     progressText.value = '';
     lastRunDurationMs.value = null;
     startRunTimer();
@@ -612,6 +746,9 @@ async function onRunBuiltinDataset() {
             progressText.value = `Dataset Progress: ${status.completed}/${status.total} (${status.status})`;
             if (status.status === 'completed' && status.result) {
                 batchResult.value = status.result;
+                if (status.result.run_id) {
+                    await refreshEntityHealthWarning(status.result.run_id);
+                }
                 break;
             }
             if (status.status === 'failed' || status.status === 'not_found') {
@@ -1087,6 +1224,63 @@ if (__VLS_ctx.error) {
     });
     (__VLS_ctx.error);
 }
+if (__VLS_ctx.entityHealthState) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "mt-3 rounded-lg border p-2" },
+        ...{ class: (__VLS_ctx.entityHealthState.level === 'warning'
+                ? 'border-arena-amber/50 bg-arena-amber/10 text-arena-amber'
+                : 'border-arena-cyan/50 bg-arena-cyan/10 text-arena-mint') },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "text-sm" },
+    });
+    (__VLS_ctx.entityHealthState.message);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "mt-1 text-xs opacity-90" },
+    });
+    (__VLS_ctx.entityHealthState.details);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "mt-2 flex items-center gap-2" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.copyEntityDiagnostic) },
+        type: "button",
+        ...{ class: "rounded border border-slate-500/60 bg-slate-900/60 px-2 py-1 text-xs text-slate-100 transition hover:border-slate-300" },
+    });
+    if (__VLS_ctx.entityDiagnosticCopyFeedback) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "text-xs text-slate-200/90" },
+        });
+        (__VLS_ctx.entityDiagnosticCopyFeedback);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.details, __VLS_intrinsicElements.details)({
+        ...{ class: "mt-2 rounded border border-slate-600/50 bg-slate-950/40 p-2 text-xs text-slate-100" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.summary, __VLS_intrinsicElements.summary)({
+        ...{ class: "cursor-pointer select-none text-slate-200" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.ul, __VLS_intrinsicElements.ul)({
+        ...{ class: "mt-2 list-disc space-y-1 pl-4" },
+    });
+    for (const [evt, idx] of __VLS_getVForSourceType((__VLS_ctx.entityHealthState.recentFailures))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({
+            key: (`${evt.ts}-${idx}`),
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "text-slate-300" },
+        });
+        (evt.ts);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (evt.purpose);
+        (evt.provider);
+        (evt.model);
+        (evt.status);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "text-slate-400" },
+        });
+        (evt.error);
+    }
+}
 if (__VLS_ctx.loading && __VLS_ctx.progressText) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
         ...{ class: "mt-3 rounded-lg border border-arena-cyan/40 bg-arena-cyan/10 p-2 text-sm text-arena-mint" },
@@ -1349,6 +1543,16 @@ else if (__VLS_ctx.batchResult) {
         ...{ onClick: (__VLS_ctx.downloadMarkdownReport) },
         ...{ class: "ml-2 mt-2 rounded-lg bg-arena-amber px-3 py-1 text-xs font-semibold text-slate-900" },
     });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.copyBatchDiagnostic) },
+        ...{ class: "ml-2 mt-2 rounded-lg border border-slate-500/60 bg-slate-900/60 px-3 py-1 text-xs font-semibold text-slate-100" },
+    });
+    if (__VLS_ctx.batchDiagnosticCopyFeedback) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "mt-2 text-xs text-slate-300" },
+        });
+        (__VLS_ctx.batchDiagnosticCopyFeedback);
+    }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "rounded-xl border border-slate-600/60 bg-slate-900/60 p-3" },
     });
@@ -1517,6 +1721,47 @@ else {
 /** @type {__VLS_StyleScopedClasses['p-2']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-red-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['opacity-90']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-500/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:border-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200/90']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-600/50']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-950/40']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['cursor-pointer']} */ ;
+/** @type {__VLS_StyleScopedClasses['select-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['list-disc']} */ ;
+/** @type {__VLS_StyleScopedClasses['space-y-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['pl-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
 /** @type {__VLS_StyleScopedClasses['mt-3']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
@@ -1788,6 +2033,20 @@ else {
 /** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
 /** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-900']} */ ;
+/** @type {__VLS_StyleScopedClasses['ml-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-500/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-900/60']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-semibold']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['mt-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-300']} */ ;
 /** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
 /** @type {__VLS_StyleScopedClasses['border']} */ ;
 /** @type {__VLS_StyleScopedClasses['border-slate-600/60']} */ ;
@@ -1834,6 +2093,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             requestTimeoutMs: requestTimeoutMs,
             includeRawJudgeInMarkdown: includeRawJudgeInMarkdown,
             progressText: progressText,
+            entityHealthState: entityHealthState,
+            entityDiagnosticCopyFeedback: entityDiagnosticCopyFeedback,
+            batchDiagnosticCopyFeedback: batchDiagnosticCopyFeedback,
             lastRunDurationMs: lastRunDurationMs,
             processors: processors,
             engines: engines,
@@ -1848,6 +2110,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             isSummarizerProcessor: isSummarizerProcessor,
             isEntityExtractorProcessor: isEntityExtractorProcessor,
             isEntityTripleMode: isEntityTripleMode,
+            copyEntityDiagnostic: copyEntityDiagnostic,
+            copyBatchDiagnostic: copyBatchDiagnostic,
             runningDurationLabel: runningDurationLabel,
             finishedDurationLabel: finishedDurationLabel,
             singleDerivedRows: singleDerivedRows,

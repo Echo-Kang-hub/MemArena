@@ -47,4 +47,11 @@ export async function getAsyncRunStatus(runId, timeoutMs) {
     });
     return data;
 }
+export async function getAuditEventsByRun(runId, limit = 300, timeoutMs) {
+    const { data } = await client.get(`/api/audit/runs/${runId}`, {
+        params: { limit },
+        timeout: timeoutMs ?? 30000
+    });
+    return data;
+}
 //# sourceMappingURL=client.js.map

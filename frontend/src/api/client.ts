@@ -75,3 +75,18 @@ export async function getAsyncRunStatus(runId: string, timeoutMs?: number): Prom
   });
   return data;
 }
+
+export async function getAuditEventsByRun(
+  runId: string,
+  limit = 300,
+  timeoutMs?: number
+): Promise<{ run_id: string; count: number; events: Array<Record<string, unknown>> }> {
+  const { data } = await client.get<{ run_id: string; count: number; events: Array<Record<string, unknown>> }>(
+    `/api/audit/runs/${runId}`,
+    {
+      params: { limit },
+      timeout: timeoutMs ?? 30000
+    }
+  );
+  return data;
+}

@@ -222,14 +222,15 @@ class EntityExtractorProcessor(MemoryProcessor):
         return _extract_entities_heuristic(text)
 
     def _generate_triples(self, text: str, entities: list[str]) -> list[dict[str, str]]:
-        if self.llm_client is None:
+        def heuristic_triples() -> list[dict[str, str]]:
             if len(entities) >= 2:
-                return [
-                    {"subject": entities[0], "predicate": "related_to", "object": entities[1]},
-                ]
+                return [{"subject": entities[0], "predicate": "related_to", "object": entities[1]}]
             if len(entities) == 1:
                 return [{"subject": entities[0], "predicate": "mentioned_in", "object": "conversation"}]
             return []
+
+        if self.llm_client is None:
+            return heuristic_triples()
 
         entity_hint = "、".join(entities) if entities else "(none)"
         prompt = (
@@ -252,13 +253,16 @@ class EntityExtractorProcessor(MemoryProcessor):
                 obj = str(item.get("object", "")).strip()
                 if subject and predicate and obj:
                     normalized.append({"subject": subject, "predicate": predicate, "object": obj})
-            return normalized
+            return normalized or heuristic_triples()
         except Exception:
-            return []
+            return heuristic_triples()
 
     def _generate_attributes(self, text: str, entities: list[str]) -> list[dict[str, str]]:
-        if self.llm_client is None:
+        def heuristic_attributes() -> list[dict[str, str]]:
             return [{"entity": ent, "attribute": "mentioned", "value": "true"} for ent in entities[:10]]
+
+        if self.llm_client is None:
+            return heuristic_attributes()
 
         entity_hint = "、".join(entities) if entities else "(none)"
         prompt = (
@@ -281,9 +285,9 @@ class EntityExtractorProcessor(MemoryProcessor):
                 value = str(item.get("value", "")).strip()
                 if entity and attribute and value:
                     normalized.append({"entity": entity, "attribute": attribute, "value": value})
-            return normalized
+            return normalized or heuristic_attributes()
         except Exception:
-            return []
+            return heuristic_attributes()
 
     # 成熟版实体抽取：支持 LLM、spaCy+LLM，输出三元组或属性两类结构
     def process(self, payload: RawConversationInput) -> ProcessorOutput:
